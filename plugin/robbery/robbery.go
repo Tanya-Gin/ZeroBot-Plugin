@@ -203,6 +203,8 @@ func init() {
 				return
 			}
 			switch reason {
+			case robberyAllowed:
+				// No block reason; continue to the attempt roll.
 			case robberyBlockVictimDaily:
 				ctx.SendChain(message.Text("对方今天已经被打劫了，给人家留点后路吧"))
 				return

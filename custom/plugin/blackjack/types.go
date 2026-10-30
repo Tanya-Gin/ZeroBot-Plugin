@@ -9,6 +9,7 @@ import (
 )
 
 const (
+	// ChipRate is the wallet-currency value of one game chip.
 	ChipRate         = 10
 	BaseChip         = 100
 	MinBuyIn         = BaseChip * ChipRate

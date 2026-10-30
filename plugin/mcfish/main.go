@@ -59,14 +59,14 @@ type probabilityLimit struct {
 // intervals used by the random roll.
 func buildZoneProbabilities(weights map[string]int) map[string]probabilityLimit {
 	result := make(map[string]probabilityLimit, 4)
-	min := 0
+	lowerBound := 0
 	for _, name := range []string{"treasure", "pole", "fish", "waste"} {
 		weight := weights[name]
 		if weight < 0 {
 			weight = 0
 		}
-		result[name] = probabilityLimit{Min: min, Max: min + weight}
-		min += weight
+		result[name] = probabilityLimit{Min: lowerBound, Max: lowerBound + weight}
+		lowerBound += weight
 	}
 	return result
 }
@@ -100,7 +100,7 @@ func pickArticleInfo(items []articleInfo, itemType string, dice int) (articleInf
 	if dice < 0 || dice >= 100 {
 		return articleInfo{}, false
 	}
-	min := 0
+	lowerBound := 0
 	for _, item := range items {
 		if item.Type != itemType {
 			continue
@@ -109,10 +109,10 @@ func pickArticleInfo(items []articleInfo, itemType string, dice int) (articleInf
 		if weight < 0 {
 			weight = 0
 		}
-		if dice >= min && dice < min+weight {
+		if dice >= lowerBound && dice < lowerBound+weight {
 			return item, true
 		}
-		min += weight
+		lowerBound += weight
 	}
 	return articleInfo{}, false
 }
@@ -875,17 +875,17 @@ func (sql *fishdb) updateBuyTimeFor(uid int64, add int) (err error) {
 	return sql.db.Insert("buff", &userInfo)
 }
 
-func (db *fishdb) getCouponFor(uid int64, times int) (int, error) {
+func (sql *fishdb) getCouponFor(uid int64, times int) (int, error) {
 	if times < 1 {
 		return 0, nil
 	}
-	db.Lock()
-	defer db.Unlock()
+	sql.Lock()
+	defer sql.Unlock()
 	userInfo := buffInfo{ID: uid}
-	if err := db.db.Create("buff", &userInfo); err != nil {
+	if err := sql.db.Create("buff", &userInfo); err != nil {
 		return 0, err
 	}
-	if err := db.db.Find("buff", &userInfo, "WHERE ID = ?", uid); err != nil && err != sqlite.ErrNullResult {
+	if err := sql.db.Find("buff", &userInfo, "WHERE ID = ?", uid); err != nil && err != sqlite.ErrNullResult {
 		return 0, err
 	}
 	if userInfo.Coupon == 0 {
@@ -992,31 +992,31 @@ func expandPoleArticles(articles []article) []article {
 	return units
 }
 
-func (db *fishdb) consumePoleUnits(uid int64, units []article) error {
+func (sql *fishdb) consumePoleUnits(uid int64, units []article) error {
 	counts := make(map[int64]int, len(units))
 	for _, unit := range units {
 		counts[unit.Duration]++
 	}
 	updated := make([]article, 0, len(counts))
 	for duration, count := range counts {
-		current, err := db.getUserThingByDuration(uid, duration)
+		current, err := sql.getUserThingByDuration(uid, duration)
 		if err != nil {
 			for _, previous := range updated {
-				_ = db.updateUserThingInfo(uid, previous)
+				_ = sql.updateUserThingInfo(uid, previous)
 			}
 			return err
 		}
 		if current.Number < count {
 			for _, previous := range updated {
-				_ = db.updateUserThingInfo(uid, previous)
+				_ = sql.updateUserThingInfo(uid, previous)
 			}
 			return fmt.Errorf("pole material %d is no longer available", duration)
 		}
 		previous := current
 		current.Number -= count
-		if err := db.updateUserThingInfo(uid, current); err != nil {
+		if err := sql.updateUserThingInfo(uid, current); err != nil {
 			for _, old := range updated {
-				_ = db.updateUserThingInfo(uid, old)
+				_ = sql.updateUserThingInfo(uid, old)
 			}
 			return err
 		}
@@ -1025,7 +1025,7 @@ func (db *fishdb) consumePoleUnits(uid int64, units []article) error {
 	return nil
 }
 
-func (db *fishdb) restorePoleUnits(uid int64, units []article) error {
+func (sql *fishdb) restorePoleUnits(uid int64, units []article) error {
 	counts := make(map[int64]int, len(units))
 	snapshots := make(map[int64]article, len(units))
 	for _, unit := range units {
@@ -1033,7 +1033,7 @@ func (db *fishdb) restorePoleUnits(uid int64, units []article) error {
 		snapshots[unit.Duration] = unit
 	}
 	for duration, count := range counts {
-		current, err := db.getUserThingByDuration(uid, duration)
+		current, err := sql.getUserThingByDuration(uid, duration)
 		if err == sqlite.ErrNullResult {
 			current = snapshots[duration]
 			current.Number = count
@@ -1042,7 +1042,7 @@ func (db *fishdb) restorePoleUnits(uid int64, units []article) error {
 		} else {
 			current.Number += count
 		}
-		if err := db.updateUserThingInfo(uid, current); err != nil {
+		if err := sql.updateUserThingInfo(uid, current); err != nil {
 			return err
 		}
 	}

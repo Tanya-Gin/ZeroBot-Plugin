@@ -36,7 +36,7 @@ var pokerCardNames = []string{
 const pokerCardCount = 54
 
 func randomCardURL(index int) (string, error) {
-	if index < 0 || index >= len(pokerCardNames) {
+	if index < 0 || index >= pokerCardCount || index >= len(pokerCardNames) {
 		return "", fmt.Errorf("poker card index %d is out of range", index)
 	}
 	cardURL := pokerCardBaseURL + pokerCardNames[index]

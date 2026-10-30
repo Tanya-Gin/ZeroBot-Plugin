@@ -18,7 +18,7 @@ import (
 
 	fcext "github.com/FloatTech/floatbox/ctxext"
 	"github.com/FloatTech/floatbox/file"
-	sql "github.com/FloatTech/sqlite"
+	sqlite "github.com/FloatTech/sqlite"
 
 	ctrl "github.com/FloatTech/zbpctrl"
 	"github.com/FloatTech/zbputils/control"
@@ -59,7 +59,7 @@ var typeZH2Breeds = map[string]string{
 
 type catdb struct {
 	sync.RWMutex
-	sql.Sqlite
+	sqlite.Sqlite
 }
 
 type breedInfo struct {
@@ -257,7 +257,7 @@ var (
 			"\n6.品种为猫娘的猫猫可以使用“上传猫猫照片”更换图片",
 		PrivateDataFolder: "cybercat",
 	}).ApplySingle(ctxext.DefaultSingle)
-	catdata = &catdb{Sqlite: sql.New(engine.DataFolder() + "catdata.db")}
+	catdata = &catdb{Sqlite: sqlite.New(engine.DataFolder() + "catdata.db")}
 	getdb   = fcext.DoOnceOnSuccess(func(ctx *zero.Ctx) bool {
 		err := catdata.Open(time.Hour * 24)
 		if err != nil {
@@ -457,37 +457,37 @@ func (sql *catdb) insert(gid string, dbInfo *catInfo) error {
 	return sql.Insert(gid, dbInfo)
 }
 
-func (db *catdb) find(gid, uid string) (dbInfo catInfo, err error) {
-	db.Lock()
-	defer db.Unlock()
-	if err = db.ensureSchemaLocked(gid); err != nil {
+func (sql *catdb) find(gid, uid string) (dbInfo catInfo, err error) {
+	sql.Lock()
+	defer sql.Unlock()
+	if err = sql.ensureSchemaLocked(gid); err != nil {
 		return
 	}
-	err = db.Find(gid, &dbInfo, "where User = ?", uid)
-	if errors.Is(err, sql.ErrNullResult) {
+	err = sql.Find(gid, &dbInfo, "where User = ?", uid)
+	if errors.Is(err, sqlite.ErrNullResult) {
 		return catInfo{}, nil
 	}
 	return
 }
 
-func (db *catdb) del(gid, uid string) error {
-	db.Lock()
-	defer db.Unlock()
-	if err := db.ensureSchemaLocked(gid); err != nil {
+func (sql *catdb) del(gid, uid string) error {
+	sql.Lock()
+	defer sql.Unlock()
+	if err := sql.ensureSchemaLocked(gid); err != nil {
 		return err
 	}
-	return db.Del(gid, "where User = ?", uid)
+	return sql.Del(gid, "where User = ?", uid)
 }
 
-func (db *catdb) delcat(gid, uid string) error {
-	db.Lock()
-	defer db.Unlock()
-	if err := db.ensureSchemaLocked(gid); err != nil {
+func (sql *catdb) delcat(gid, uid string) error {
+	sql.Lock()
+	defer sql.Unlock()
+	if err := sql.ensureSchemaLocked(gid); err != nil {
 		return err
 	}
 	dbInfo := catInfo{}
-	if err := db.Find(gid, &dbInfo, "where User = ?", uid); err != nil {
-		if errors.Is(err, sql.ErrNullResult) {
+	if err := sql.Find(gid, &dbInfo, "where User = ?", uid); err != nil {
+		if errors.Is(err, sqlite.ErrNullResult) {
 			return nil
 		}
 		return err
@@ -496,7 +496,7 @@ func (db *catdb) delcat(gid, uid string) error {
 		User: dbInfo.User,
 		Food: dbInfo.Food,
 	}
-	return db.Insert(gid, &newInfo)
+	return sql.Insert(gid, &newInfo)
 }
 
 func (db *catdb) getGroupdata(gid string) (list []catInfo, err error) {
@@ -512,7 +512,7 @@ func (db *catdb) getGroupdata(gid string) (list []catInfo, err error) {
 		}
 		return nil
 	})
-	if errors.Is(err, sql.ErrNullResult) {
+	if errors.Is(err, sqlite.ErrNullResult) {
 		err = nil
 	}
 	return

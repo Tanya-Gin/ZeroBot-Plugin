@@ -10,7 +10,8 @@ import (
 
 const (
 	// ChipRate is the wallet-currency value of one game chip.
-	ChipRate         = 10
+	ChipRate = 10
+	// BaseChip is the starting wager, in game chips.
 	BaseChip         = 100
 	MinBuyIn         = BaseChip * ChipRate
 	CashOutPercent   = 80
@@ -24,13 +25,17 @@ const (
 )
 
 var (
+	// ErrInvalidSplit indicates that the current hand cannot be split.
 	ErrInvalidSplit      = errors.New("当前手牌不满足分牌条件")
 	ErrInvalidDouble     = errors.New("当前手牌不满足加倍条件")
 	ErrInvalidSurrender  = errors.New("当前手牌不满足投降条件")
 	ErrInsufficientFunds = errors.New("钱包余额不足")
 )
 
+// Card represents one playing card.
 type Card struct{ Name, Suit, Rank string }
+
+// Hand represents a player's or dealer's cards.
 type Hand struct{ Cards []Card }
 
 type HandState string

@@ -6,6 +6,7 @@ import (
 	"image/color"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/FloatTech/AnimeAPI/wallet"
@@ -25,19 +26,32 @@ var (
 	storeLimiter = rate.NewManager[int64](time.Second*3, 1)
 	refresh      = false
 	timeNow      = 0
+	tradeMu      sync.Mutex
+	refreshMu    sync.Mutex
+	userLocks    sync.Map
 	refreshFish  = func(ctx *zero.Ctx) bool {
-		if refresh && timeNow == time.Now().Day() {
+		refreshMu.Lock()
+		defer refreshMu.Unlock()
+		if refresh && timeNow == localDateKey(time.Now()) {
 			return true
 		}
-		refresh, err := dbdata.refreshStroeInfo()
+		var err error
+		refresh, err = dbdata.refreshStroeInfo()
 		if err != nil {
 			ctx.SendChain(message.Text("[ERROR at store.go.1]:", err))
 			return refresh
 		}
-		timeNow = time.Now().Day()
+		timeNow = localDateKey(time.Now())
 		return refresh
 	}
 )
+
+func lockUser(uid int64) func() {
+	mu, _ := userLocks.LoadOrStore(uid, &sync.Mutex{})
+	mutex := mu.(*sync.Mutex)
+	mutex.Lock()
+	return mutex.Unlock
+}
 
 func limitSet(ctx *zero.Ctx) *rate.Limiter {
 	return storeLimiter.Load(ctx.Event.UserID)
@@ -69,15 +83,20 @@ func init() {
 	})
 	engine.OnRegex(`^出售(`+strings.Join(thingList, "|")+`)\s*(\d*)$`, getdb, refreshFish).SetBlock(true).Limit(limitSet).Handle(func(ctx *zero.Ctx) {
 		uid := ctx.Event.UserID
+		defer lockUser(uid)()
 		thingName := ctx.State["regex_matched"].([]string)[1]
-		number, _ := strconv.Atoi(ctx.State["regex_matched"].([]string)[2])
-		if number == 0 || strings.Contains(thingName, "竿") {
+		number, countErr := parseCount(ctx.State["regex_matched"].([]string)[2])
+		if countErr != nil {
+			ctx.SendChain(message.Text("请输入正确的数量"))
+			return
+		}
+		if strings.Contains(thingName, "竿") {
 			number = 1
 		}
 
 		// 检测物品交易次数
 		if strings.Contains(thingName, "竿") {
-			number, err := dbdata.checkCanSalesFor(uid, thingName, number)
+			number, err := dbdata.checkCanSalesFor(uid, thingName, number, false)
 			if err != nil {
 				ctx.SendChain(message.Text("[ERROR,查询购买资质失败]:", err))
 				return
@@ -99,6 +118,37 @@ func init() {
 		}
 		index := 0
 		thing := article{}
+		transactionDone := false
+		userChanged := false
+		storeChanged := false
+		walletCredited := false
+		payout := 0
+		var soldThingBefore article
+		var usedRecordBefore article
+		recordChanged := false
+		var soldStoreBefore, soldStoreAfter store
+		defer func() {
+			if transactionDone {
+				return
+			}
+			if walletCredited {
+				_ = wallet.InsertWalletOf(uid, -payout)
+			}
+			if storeChanged {
+				if soldStoreBefore == (store{}) {
+					soldStoreAfter.Number = 0
+					_ = dbdata.updateStoreInfo(soldStoreAfter)
+				} else {
+					_ = dbdata.updateStoreInfo(soldStoreBefore)
+				}
+			}
+			if userChanged {
+				_ = dbdata.updateUserThingInfo(uid, soldThingBefore)
+			}
+			if recordChanged {
+				_ = dbdata.updateUserThingInfo(uid, usedRecordBefore)
+			}
+		}()
 		if len(articles) > 1 {
 			msg := make(message.Message, 0, 3+len(articles))
 			msg = append(msg, message.Reply(ctx.Event.MessageID), message.Text("找到以下物品:\n"))
@@ -114,7 +164,7 @@ func init() {
 			ctx.Send(msg)
 			// 等待用户下一步选择
 			sell := false
-			recv, cancel := zero.NewFutureEvent("message", 999, false, zero.RegexRule(`^(取消|\d+)$`), zero.CheckUser(ctx.Event.UserID)).Repeat()
+			recv, cancel := zero.NewFutureEvent("message", 999, false, zero.RegexRule(`^(取消|\d+)$`), zero.CheckUser(ctx.Event.UserID), zero.CheckGroup(ctx.Event.GroupID)).Repeat()
 			defer cancel()
 			for {
 				select {
@@ -136,7 +186,7 @@ func init() {
 						return
 					}
 					index, err = strconv.Atoi(nextcmd)
-					if err != nil || index > len(articles)-1 {
+					if err != nil || index < 0 || index > len(articles)-1 {
 						ctx.SendChain(message.At(ctx.Event.UserID), message.Text("请输入正确的序号"))
 						continue
 					}
@@ -149,26 +199,20 @@ func init() {
 		}
 
 		thing = articles[index]
+		soldThingBefore = thing
 		if thing.Number < number {
 			number = thing.Number
 		}
 
-		var pice int
-		if strings.Contains(thingName, "竿") || thingName == "三叉戟" {
-			poleInfo := strings.Split(articles[index].Other, "/")
-			durable, _ := strconv.Atoi(poleInfo[0])
-			maintenance, _ := strconv.Atoi(poleInfo[1])
-			induceLevel, _ := strconv.Atoi(poleInfo[2])
-			favorLevel, _ := strconv.Atoi(poleInfo[3])
-			pice = (priceList[thingName] - (durationList[thingName] - durable) - maintenance*2 +
-				induceLevel*600*discountList["诱钓"]/100 +
-				favorLevel*1800*discountList["海之眷顾"]/100) * discountList[thingName] / 100
-		} else {
-			pice = priceList[thingName] * discountList[thingName] / 100
+		pice, err := calculateItemMarketValue(thingName, thing.Other)
+		if err != nil {
+			ctx.SendChain(message.Text("[ERROR at store.go]:", err))
+			return
 		}
-		ctx.Send(message.ReplyWithMessage(ctx.Event.MessageID, message.Text("是否接受商店将以", pice*number*8/10, "收购", number, "个", thingName, "?\n回答\"是\"或\"否\"")))
+		previewPayout := pice * number * int(100-poleSaleTaxPercent) / 100
+		ctx.Send(message.ReplyWithMessage(ctx.Event.MessageID, message.Text("是否接受商店将以", previewPayout, "收购", number, "个", thingName, "?\n回答\"是\"或\"否\"")))
 		// 等待用户下一步选择
-		recv, cancel1 := zero.NewFutureEvent("message", 999, false, zero.RegexRule(`^(是|否)$`), zero.CheckUser(ctx.Event.UserID)).Repeat()
+		recv, cancel1 := zero.NewFutureEvent("message", 999, false, zero.RegexRule(`^(是|否)$`), zero.CheckUser(ctx.Event.UserID), zero.CheckGroup(ctx.Event.GroupID)).Repeat()
 		defer cancel1()
 		buy := false
 		for {
@@ -203,7 +247,7 @@ func init() {
 			if numberOfRecord > 0 {
 				ctx.Send(message.ReplyWithMessage(ctx.Event.MessageID, message.Text("是否使用唱片让价格翻倍?\n回答\"是\"或\"否\"")))
 				// 等待用户下一步选择
-				recv, cancel2 := zero.NewFutureEvent("message", 999, false, zero.RegexRule(`^(是|否)$`), zero.CheckUser(ctx.Event.UserID)).Repeat()
+				recv, cancel2 := zero.NewFutureEvent("message", 999, false, zero.RegexRule(`^(是|否)$`), zero.CheckUser(ctx.Event.UserID), zero.CheckGroup(ctx.Event.GroupID)).Repeat()
 				defer cancel2()
 				use := false
 				checkTime := false
@@ -227,15 +271,19 @@ func init() {
 					if thingName == "唱片" {
 						thing.Number--
 					}
+					usedRecordBefore = recordInfo
 					recordInfo.Number--
 					err = dbdata.updateUserThingInfo(uid, recordInfo)
 					if err != nil {
 						ctx.SendChain(message.Text("[ERROR at store.go.9.2]:", err))
 						return
 					}
+					recordChanged = true
 				}
 			}
 		}
+		tradeMu.Lock()
+		defer tradeMu.Unlock()
 		msg := ""
 		curse, err := dbdata.getNumberFor(uid, "宝藏诅咒")
 		if err != nil {
@@ -252,11 +300,12 @@ func init() {
 			ctx.SendChain(message.Text("[ERROR at store.go.6]:", err))
 			return
 		}
+		userChanged = true
 		newCommodity := store{}
-		if strings.Contains(thing.Name, "竿") || thing.Name == "三叉戟" {
-			if pice >= priceList[thing.Name]*2 { // 无附魔的不要
+		if isPole(thing.Name) {
+			if pice >= priceList[poleBaseName(thing.Name)]*2 { // 无附魔的不要
 				newCommodity = store{
-					Duration: time.Now().Unix(),
+					Duration: nextItemID(),
 					Type:     "pole",
 					Name:     thing.Name,
 					Number:   1,
@@ -276,11 +325,13 @@ func init() {
 			}
 			if len(things) == 0 {
 				things = append(things, store{
-					Duration: time.Now().Unix(),
+					Duration: nextItemID(),
 					Name:     thing.Name,
 					Price:    pice,
 					Type:     thing.Type,
 				})
+			} else {
+				soldStoreBefore = things[0]
 			}
 			newCommodity = things[0]
 			if newCommodity.Number < 255 {
@@ -291,18 +342,23 @@ func init() {
 			}
 		}
 		if newCommodity != (store{}) && newCommodity.Type != "waste" { // 不收垃圾
+			soldStoreAfter = newCommodity
 			err = dbdata.updateStoreInfo(newCommodity)
 			if err != nil {
 				ctx.SendChain(message.Text("[ERROR at store.go.9]:", err))
 				return
 			}
+			storeChanged = true
 		}
-		pice = pice * 8 / 10
-		err = wallet.InsertWalletOf(uid, pice*number)
+		pice = pice * int(100-poleSaleTaxPercent) / 100
+		payout = pice * number
+		err = wallet.InsertWalletOf(uid, payout)
 		if err != nil {
 			ctx.SendChain(message.Text("[ERROR at store.go.10]:", err))
 			return
 		}
+		walletCredited = true
+		transactionDone = true
 		if strings.Contains(thingName, "竿") {
 			err = dbdata.updateCurseFor(uid, "sell", 1)
 			if err != nil {
@@ -310,7 +366,7 @@ func init() {
 			}
 		}
 		// 更新交易限制
-		err = dbdata.updateCanSalesFor(uid, thingName, number)
+		err = dbdata.updateCanSalesFor(uid, thingName, number, false)
 		if err != nil {
 			ctx.SendChain(message.Text("[ERROR,记录鱼类交易数量失败，此次交易不记录]:", err))
 		}
@@ -319,6 +375,7 @@ func init() {
 	})
 	engine.OnRegex(`^出售所有垃圾`, getdb, refreshFish).SetBlock(true).Limit(limitSet).Handle(func(ctx *zero.Ctx) {
 		uid := ctx.Event.UserID
+		defer lockUser(uid)()
 
 		articles, err := dbdata.getUserTypeInfo(uid, "waste")
 		if err != nil {
@@ -346,7 +403,7 @@ func init() {
 
 		ctx.Send(message.ReplyWithMessage(ctx.Event.MessageID, message.Text("是否接受回收站将以", pice, "收购全部垃圾", "?\n回答\"是\"或\"否\"")))
 		// 等待用户下一步选择
-		recv, cancel1 := zero.NewFutureEvent("message", 999, false, zero.RegexRule(`^(是|否)$`), zero.CheckUser(ctx.Event.UserID)).Repeat()
+		recv, cancel1 := zero.NewFutureEvent("message", 999, false, zero.RegexRule(`^(是|否)$`), zero.CheckUser(ctx.Event.UserID), zero.CheckGroup(ctx.Event.GroupID)).Repeat()
 		defer cancel1()
 		buy := false
 		for {
@@ -367,6 +424,8 @@ func init() {
 			}
 		}
 
+		tradeMu.Lock()
+		defer tradeMu.Unlock()
 		msg := ""
 		curse, err := dbdata.getNumberFor(uid, "宝藏诅咒")
 		if err != nil {
@@ -378,26 +437,44 @@ func init() {
 			pice = pice * (100 - 10*curse) / 100
 		}
 
+		changed := make([]article, 0, len(articles))
+		transactionDone := false
+		defer func() {
+			if transactionDone {
+				return
+			}
+			for _, info := range changed {
+				_ = dbdata.updateUserThingInfo(uid, info)
+			}
+		}()
 		for _, info := range articles {
+			original := info
 			info.Number = 0
 			err = dbdata.updateUserThingInfo(uid, info)
 			if err != nil {
 				ctx.SendChain(message.Text("[ERROR at store.go.6]:", err))
 				return
 			}
+			changed = append(changed, original)
 		}
 		err = wallet.InsertWalletOf(uid, pice)
 		if err != nil {
 			ctx.SendChain(message.Text("[ERROR，出售垃圾失败，回收站卷款跑路了]:", err))
 			return
 		}
+		transactionDone = true
 		ctx.Send(message.ReplyWithMessage(ctx.Event.MessageID, message.Text("出售成功,你赚到了", pice, msg)))
 	})
 	engine.OnRegex(`^购买(`+strings.Join(thingList, "|")+`|初始木竿)\s*(\d*)$`, getdb, refreshFish).SetBlock(true).Limit(limitSet).Handle(func(ctx *zero.Ctx) {
 		uid := ctx.Event.UserID
+		defer lockUser(uid)()
 		thingName := ctx.State["regex_matched"].([]string)[1]
-		number, _ := strconv.Atoi(ctx.State["regex_matched"].([]string)[2])
-		if number == 0 || strings.Contains(thingName, "竿") {
+		number, countErr := parseCount(ctx.State["regex_matched"].([]string)[2])
+		if countErr != nil {
+			ctx.SendChain(message.Text("请输入正确的数量"))
+			return
+		}
+		if strings.Contains(thingName, "竿") {
 			number = 1
 		}
 
@@ -412,7 +489,7 @@ func init() {
 		}
 
 		// 检测物品交易次数
-		number, err = dbdata.checkCanSalesFor(uid, thingName, number)
+		number, err = dbdata.checkCanSalesFor(uid, thingName, number, true)
 		if err != nil {
 			ctx.SendChain(message.Text("[ERROR at store.go.75]:", err))
 			return
@@ -463,23 +540,12 @@ func init() {
 		index := 0
 		pice := make([]int, 0, len(thingInfos))
 		for _, info := range thingInfos {
-			if strings.Contains(thingName, "竿") || thingName == "三叉戟" {
-				poleInfo := strings.Split(info.Other, "/")
-				durable, _ := strconv.Atoi(poleInfo[0])
-				maintenance, _ := strconv.Atoi(poleInfo[1])
-				induceLevel, _ := strconv.Atoi(poleInfo[2])
-				favorLevel, _ := strconv.Atoi(poleInfo[3])
-				thingPice := (priceList[info.Name] - (durationList[info.Name] - durable) - maintenance*2 +
-					induceLevel*600*discountList["诱钓"]/100 +
-					favorLevel*1800*discountList["海之眷顾"]/100) * discountList[info.Name] / 100
-				if strings.Contains(thingName, "初始木竿") {
-					thingPice = priceList["木竿"] + priceList["木竿"]*discountList["木竿"]/100
-				}
-				pice = append(pice, thingPice)
-			} else {
-				thingPice := priceList[info.Name] * discountList[info.Name] / 100
-				pice = append(pice, thingPice)
+			thingPice, valuationErr := calculateItemMarketValue(info.Name, info.Other)
+			if valuationErr != nil {
+				ctx.SendChain(message.Text("[ERROR at store.go]:", valuationErr))
+				return
 			}
+			pice = append(pice, thingPice)
 		}
 		if len(thingInfos) > 1 {
 			msg := make(message.Message, 0, 3+len(thingInfos))
@@ -497,7 +563,7 @@ func init() {
 			ctx.Send(message.ReplyWithMessage(ctx.Event.MessageID, msg...))
 			// 等待用户下一步选择
 			sell := false
-			recv, cancel := zero.NewFutureEvent("message", 999, false, zero.RegexRule(`^(取消|\d+)$`), zero.CheckUser(ctx.Event.UserID)).Repeat()
+			recv, cancel := zero.NewFutureEvent("message", 999, false, zero.RegexRule(`^(取消|\d+)$`), zero.CheckUser(ctx.Event.UserID), zero.CheckGroup(ctx.Event.GroupID)).Repeat()
 			defer cancel()
 			for {
 				select {
@@ -519,7 +585,7 @@ func init() {
 						return
 					}
 					index, err = strconv.Atoi(nextcmd)
-					if err != nil || index > len(thingInfos)-1 {
+					if err != nil || index < 0 || index > len(thingInfos)-1 {
 						ctx.SendChain(message.At(ctx.Event.UserID), message.Text("请输入正确的序号"))
 						continue
 					}
@@ -540,18 +606,14 @@ func init() {
 
 		msg := ""
 		times := math.Min(3, number)
-		coupon, err := dbdata.useCouponAt(uid, times)
+		coupon, err := dbdata.getCouponFor(uid, times)
 		if err != nil {
-			logrus.Warnln(err)
+			ctx.SendChain(message.Text("[ERROR at store.go.9.2]:", err))
+			return
 		}
 		if coupon != -1 {
 			msg += "\n(半价福利还有" + strconv.Itoa(3-coupon) + "次)"
 			price = pice[index]*(number-coupon) + (pice[index]/2)*coupon
-		} else {
-			err = dbdata.updateBuyTimeFor(uid, 1)
-			if err != nil {
-				logrus.Warnln(err)
-			}
 		}
 		curse, err := dbdata.getNumberFor(uid, "宝藏诅咒")
 		if err != nil {
@@ -571,7 +633,7 @@ func init() {
 
 		ctx.Send(message.ReplyWithMessage(ctx.Event.MessageID, message.Text("你确定花费", price, "购买", number, "个", thingName, "?", msg, "\n回答\"是\"或\"否\"")))
 		// 等待用户下一步选择
-		recv, cancel1 := zero.NewFutureEvent("message", 999, false, zero.RegexRule(`^(是|否)$`), zero.CheckUser(ctx.Event.UserID)).Repeat()
+		recv, cancel1 := zero.NewFutureEvent("message", 999, false, zero.RegexRule(`^(是|否)$`), zero.CheckUser(ctx.Event.UserID), zero.CheckGroup(ctx.Event.GroupID)).Repeat()
 		defer cancel1()
 		buy := false
 		for {
@@ -592,7 +654,15 @@ func init() {
 			}
 		}
 
-		ok, err := dbdata.checkStoreFor(thing, number)
+		tradeMu.Lock()
+		defer tradeMu.Unlock()
+		money = wallet.GetWalletOf(uid)
+		if money < price {
+			ctx.SendChain(message.Text("确认购买时余额已变化，当前余额(", money, ")不够支付"))
+			return
+		}
+		var ok bool
+		thing, ok, err = dbdata.checkStoreFor(thing, number)
 		if err != nil {
 			ctx.SendChain(message.Text("[ERROR at store.go.11]:", err))
 			return
@@ -601,6 +671,24 @@ func init() {
 			ctx.SendChain(message.Reply(ctx.Event.MessageID), message.Text("你慢了一步,物品被别人买走了"))
 			return
 		}
+		storeBefore := thing
+		transactionDone := false
+		walletDebited := false
+		purchaseItemChanged := false
+		var purchaseBefore article
+		var newCommodity article
+		defer func() {
+			if transactionDone {
+				return
+			}
+			if walletDebited {
+				_ = wallet.InsertWalletOf(uid, price)
+			}
+			_ = dbdata.updateStoreInfo(storeBefore)
+			if purchaseItemChanged {
+				_ = dbdata.updateUserThingInfo(uid, purchaseBefore)
+			}
+		}()
 		thing.Number -= number
 		err = dbdata.updateStoreInfo(thing)
 		if err != nil {
@@ -612,10 +700,10 @@ func init() {
 			ctx.SendChain(message.Text("[ERROR at store.go.13]:", err))
 			return
 		}
-		newCommodity := article{}
+		walletDebited = true
 		if strings.Contains(thingName, "竿") || thingName == "三叉戟" {
 			newCommodity = article{
-				Duration: time.Now().Unix(),
+				Duration: nextItemID(),
 				Type:     thing.Type,
 				Name:     thing.Name,
 				Number:   1,
@@ -624,6 +712,8 @@ func init() {
 			if thingName == "初始木竿" {
 				newCommodity.Name = "木竿"
 			}
+			purchaseBefore = newCommodity
+			purchaseBefore.Number = 0
 		} else {
 			things, err1 := dbdata.getUserThingInfo(uid, thingName)
 			if err1 != nil {
@@ -632,10 +722,13 @@ func init() {
 			}
 			if len(things) == 0 {
 				things = append(things, article{
-					Duration: time.Now().Unix(),
+					Duration: nextItemID(),
 					Name:     thing.Name,
 					Type:     thing.Type,
 				})
+				purchaseBefore = things[0]
+			} else {
+				purchaseBefore = things[0]
 			}
 			newCommodity = things[0]
 			newCommodity.Number += number
@@ -645,6 +738,17 @@ func init() {
 			ctx.SendChain(message.Text("[ERROR at store.go.14]:", err))
 			return
 		}
+		purchaseItemChanged = true
+		if coupon != -1 {
+			if _, couponErr := dbdata.useCouponAt(uid, coupon); couponErr != nil {
+				ctx.SendChain(message.Text("[ERROR at store.go.16]:", couponErr))
+				return
+			}
+		} else if buyErr := dbdata.updateBuyTimeFor(uid, 1); buyErr != nil {
+			ctx.SendChain(message.Text("[ERROR at store.go.16]:", buyErr))
+			return
+		}
+		transactionDone = true
 		if strings.Contains(thingName, "竿") {
 			err = dbdata.updateCurseFor(uid, "buy", 1)
 			if err != nil {
@@ -652,7 +756,7 @@ func init() {
 			}
 		}
 		// 更新交易限制
-		err = dbdata.updateCanSalesFor(uid, thingName, number)
+		err = dbdata.updateCanSalesFor(uid, thingName, number, true)
 		if err != nil {
 			ctx.SendChain(message.Text("[ERROR,记录鱼类交易数量失败，此次交易不记录]:", err))
 		}
@@ -792,19 +896,9 @@ func drawStroeInfoImage(stroeInfo []store) (picImage image.Image, err error) {
 			name += "(" + info.Other + ")"
 		}
 		numberStr := strconv.Itoa(info.Number)
-		pice := 0
-		if strings.Contains(name, "竿") {
-			poleInfo := strings.Split(info.Other, "/")
-			durable, _ := strconv.Atoi(poleInfo[0])
-			maintenance, _ := strconv.Atoi(poleInfo[1])
-			induceLevel, _ := strconv.Atoi(poleInfo[2])
-			favorLevel, _ := strconv.Atoi(poleInfo[3])
-			pice = (priceList[info.Name] - (durationList[info.Name] - durable) - maintenance*2 + induceLevel*600 + favorLevel*1800) * discountList[info.Name] / 100
-			if strings.Contains(name, "初始木竿") {
-				pice = priceList["木竿"] + priceList["木竿"]*discountList["木竿"]/100
-			}
-		} else {
-			pice = priceList[info.Name] * discountList[info.Name] / 100
+		pice, err := calculateItemMarketValue(info.Name, info.Other)
+		if err != nil {
+			return nil, err
 		}
 
 		canvas.DrawStringAnchored(name, 10+nameW/2, textDy+textH/2, 0.5, 0.5)

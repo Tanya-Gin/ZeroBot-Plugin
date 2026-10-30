@@ -3,6 +3,7 @@ package mcfish
 
 import (
 	"math/rand"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -17,6 +18,7 @@ import (
 func init() {
 	engine.OnRegex(`^进行(([1-5]\d|[1-9])次)?钓鱼$`, getdb).SetBlock(true).Limit(ctxext.LimitByUser).Handle(func(ctx *zero.Ctx) {
 		uid := ctx.Event.UserID
+		defer lockUser(uid)()
 		numberOfPole, err := dbdata.getNumberFor(uid, "竿")
 		if err != nil {
 			ctx.SendChain(message.Text("[ERROR at store.go.9.3]:", err))
@@ -26,15 +28,15 @@ func init() {
 			ctx.SendChain(message.Text("你有", numberOfPole, "支鱼竿,大于30支的玩家不允许钓鱼"))
 			return
 		}
+		rawCount := ctx.State["regex_matched"].([]string)[2]
 		fishNumber := 1
-		info := ctx.State["regex_matched"].([]string)[2]
-		if info != "" {
-			number, err := strconv.Atoi(info)
-			if err != nil || number > FishLimit {
+		if rawCount != "" {
+			var countErr error
+			fishNumber, countErr = parseCount(rawCount)
+			if countErr != nil || fishNumber > FishLimit {
 				ctx.SendChain(message.Text("请输入正确的次数"))
 				return
 			}
-			fishNumber = number
 		}
 		equipInfo, err := dbdata.getUserEquip(uid)
 		if err != nil {
@@ -53,7 +55,7 @@ func init() {
 			}
 			ctx.SendChain(message.Reply(ctx.Event.MessageID), message.Text("你尚未装备鱼竿,是否花费100购买鱼竿?\n回答\"是\"或\"否\""))
 			// 等待用户下一步选择
-			recv, cancel := zero.NewFutureEvent("message", 999, false, zero.RegexRule(`^(是|否)$`), zero.CheckUser(ctx.Event.UserID)).Repeat()
+			recv, cancel := zero.NewFutureEvent("message", 999, false, zero.RegexRule(`^(是|否)$`), zero.CheckUser(ctx.Event.UserID), zero.CheckGroup(ctx.Event.GroupID)).Repeat()
 			defer cancel()
 			buy := false
 			for {
@@ -228,75 +230,36 @@ func init() {
 			dice := rand.Intn(100)
 			switch {
 			case dice >= localProbabilities["waste"].Min && dice < localProbabilities["waste"].Max: // 垃圾
-				typeOfThing = "waste"
-				thingName = wasteList[rand.Intn(len(wasteList))]
-				picName = thingName
+				if item, ok := pickArticleInfo(articlesInfo.ArticleInfo, "waste", rand.Intn(100)); ok {
+					typeOfThing = item.Type
+					thingName = item.Name
+					picName = item.Name
+				}
 			case dice >= localProbabilities["treasure"].Min && dice < localProbabilities["treasure"].Max: // 宝藏
-				dice = rand.Intn(100)
-				switch {
-				case dice >= localProbabilities["美西螈"].Min && dice < localProbabilities["美西螈"].Max:
-					typeOfThing = "pole"
-					picName = "美西螈"
-					thingName = "美西螈"
-				case dice >= localProbabilities["唱片"].Min && dice < localProbabilities["唱片"].Max:
-					typeOfThing = "article"
-					picName = "唱片"
-					thingName = "唱片"
-				case dice >= localProbabilities["海之眷顾"].Min && dice < localProbabilities["海之眷顾"].Max:
-					typeOfThing = "article"
-					picName = "book"
-					thingName = "海之眷顾"
-				case dice >= localProbabilities["净化书"].Min && dice < localProbabilities["净化书"].Max:
-					typeOfThing = "article"
-					picName = "book"
-					thingName = "净化书"
-				case dice >= localProbabilities["宝藏诅咒"].Min && dice < localProbabilities["宝藏诅咒"].Max:
-					typeOfThing = "article"
-					picName = "book"
-					thingName = "宝藏诅咒"
-				case dice >= localProbabilities["海豚"].Min && dice < localProbabilities["海豚"].Max:
-					typeOfThing = "fish"
-					picName = "海豚"
-					thingName = "海豚"
-				default:
-					typeOfThing = "article"
-					picName = "book"
-					thingName = "诱钓"
+				if item, ok := pickArticleInfo(articlesInfo.ArticleInfo, "treasure", rand.Intn(100)); ok {
+					typeOfThing = item.Type
+					thingName = item.Name
+					picName = item.Name
+					if item.Name == "美西螈" {
+						typeOfThing = "pole"
+					} else if item.Name == "海豚" {
+						typeOfThing = "fish"
+					} else if item.Name == "诱钓" || item.Name == "海之眷顾" || item.Name == "净化书" || item.Name == "宝藏诅咒" {
+						picName = "book"
+					}
 				}
 			case dice >= localProbabilities["pole"].Min && dice < localProbabilities["pole"].Max: // 鱼竿
-				typeOfThing = "pole"
-				dice := rand.Intn(100)
-				switch {
-				case dice >= localProbabilities["铁竿"].Min && dice < localProbabilities["铁竿"].Max:
-					thingName = "铁竿"
-				case dice >= localProbabilities["金竿"].Min && dice < localProbabilities["金竿"].Max:
-					thingName = "金竿"
-				case dice >= localProbabilities["钻石竿"].Min && dice < localProbabilities["钻石竿"].Max:
-					thingName = "钻石竿"
-				case dice >= localProbabilities["下界合金竿"].Min && dice < localProbabilities["下界合金竿"].Max:
-					thingName = "下界合金竿"
-				default:
-					thingName = "木竿"
+				if item, ok := pickArticleInfo(articlesInfo.ArticleInfo, "pole", rand.Intn(100)); ok {
+					typeOfThing = item.Type
+					thingName = item.Name
+					picName = item.Name
 				}
-				picName = thingName
 			case dice >= localProbabilities["fish"].Min && dice < localProbabilities["fish"].Max: // 鱼类
-				typeOfThing = "fish"
-				dice = rand.Intn(100)
-				switch {
-				case dice >= localProbabilities["墨鱼"].Min && dice < localProbabilities["墨鱼"].Max:
-					thingName = "墨鱼"
-				case dice >= localProbabilities["鳕鱼"].Min && dice < localProbabilities["鳕鱼"].Max:
-					thingName = "鳕鱼"
-				case dice >= localProbabilities["鲑鱼"].Min && dice < localProbabilities["鲑鱼"].Max:
-					thingName = "鲑鱼"
-				case dice >= localProbabilities["热带鱼"].Min && dice < localProbabilities["热带鱼"].Max:
-					thingName = "热带鱼"
-				case dice >= localProbabilities["河豚"].Min && dice < localProbabilities["河豚"].Max:
-					thingName = "河豚"
-				default:
-					thingName = "鹦鹉螺"
+				if item, ok := pickArticleInfo(articlesInfo.ArticleInfo, "fish", rand.Intn(100)); ok {
+					typeOfThing = item.Type
+					thingName = item.Name
+					picName = item.Name
 				}
-				picName = thingName
 			default:
 				thingNameList["赛博空气"]++
 			}
@@ -307,7 +270,7 @@ func init() {
 						"/" + strconv.Itoa(rand.Intn(10)) + "/" +
 						strconv.Itoa(rand.Intn(3)) + "/" + strconv.Itoa(rand.Intn(2))
 					newThing = article{
-						Duration: time.Now().Unix()*100 + int64(i),
+						Duration: nextItemID(),
 						Type:     typeOfThing,
 						Name:     thingName,
 						Number:   number,
@@ -321,7 +284,7 @@ func init() {
 					}
 					if len(thingInfo) == 0 {
 						newThing = article{
-							Duration: time.Now().Unix()*100 + int64(i),
+							Duration: nextItemID(),
 							Type:     typeOfThing,
 							Name:     thingName,
 						}
@@ -367,8 +330,13 @@ func init() {
 		}
 		msgInfo := make(message.Message, 0, 3+len(thingNameList))
 		msgInfo = append(msgInfo, message.Reply(ctx.Event.MessageID), message.Text("你进行了", fishNumber, "次钓鱼,结果如下:\n"))
-		for name, number := range thingNameList {
-			msgInfo = append(msgInfo, message.Text(name, " : ", number, "\n"))
+		resultNames := make([]string, 0, len(thingNameList))
+		for name := range thingNameList {
+			resultNames = append(resultNames, name)
+		}
+		sort.Strings(resultNames)
+		for _, name := range resultNames {
+			msgInfo = append(msgInfo, message.Text(name, " : ", thingNameList[name], "\n"))
 		}
 		msgInfo = append(msgInfo, message.Text(msg))
 		ctx.Send(msgInfo)

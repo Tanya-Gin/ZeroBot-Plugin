@@ -3,16 +3,18 @@ package mcfish
 
 import (
 	"encoding/json"
+	"fmt"
 	"math/rand"
 	"os"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	fcext "github.com/FloatTech/floatbox/ctxext"
 	"github.com/FloatTech/floatbox/math"
-	sql "github.com/FloatTech/sqlite"
+	sqlite "github.com/FloatTech/sqlite"
 	ctrl "github.com/FloatTech/zbpctrl"
 	"github.com/FloatTech/zbputils/control"
 	"github.com/FloatTech/zbputils/ctxext"
@@ -22,7 +24,7 @@ import (
 
 type fishdb struct {
 	sync.RWMutex
-	db sql.Sqlite
+	db sqlite.Sqlite
 }
 
 // FishLimit 钓鱼次数上限
@@ -51,6 +53,116 @@ type articleInfo struct {
 type probabilityLimit struct {
 	Min int
 	Max int
+}
+
+// buildZoneProbabilities converts per-zone weights into contiguous [min, max)
+// intervals used by the random roll.
+func buildZoneProbabilities(weights map[string]int) map[string]probabilityLimit {
+	result := make(map[string]probabilityLimit, 4)
+	min := 0
+	for _, name := range []string{"treasure", "pole", "fish", "waste"} {
+		weight := weights[name]
+		if weight < 0 {
+			weight = 0
+		}
+		result[name] = probabilityLimit{Min: min, Max: min + weight}
+		min += weight
+	}
+	return result
+}
+
+// sameLocalDate compares a complete local calendar date rather than only the
+// day number, which would incorrectly match the same day in another month.
+func sameLocalDate(timestamp int64, now time.Time) bool {
+	if timestamp == 0 {
+		return false
+	}
+	old := time.Unix(timestamp, 0).In(now.Location())
+	return old.Year() == now.Year() && old.YearDay() == now.YearDay()
+}
+
+func localDateKey(now time.Time) int {
+	return now.Year()*1000 + now.YearDay()
+}
+
+func parseCount(raw string) (int, error) {
+	if strings.TrimSpace(raw) == "" {
+		return 1, nil
+	}
+	count, err := strconv.Atoi(strings.TrimSpace(raw))
+	if err != nil || count < 1 {
+		return 0, fmt.Errorf("invalid count %q", raw)
+	}
+	return count, nil
+}
+
+func pickArticleInfo(items []articleInfo, itemType string, dice int) (articleInfo, bool) {
+	if dice < 0 || dice >= 100 {
+		return articleInfo{}, false
+	}
+	min := 0
+	for _, item := range items {
+		if item.Type != itemType {
+			continue
+		}
+		weight := item.Probability
+		if weight < 0 {
+			weight = 0
+		}
+		if dice >= min && dice < min+weight {
+			return item, true
+		}
+		min += weight
+	}
+	return articleInfo{}, false
+}
+
+func validateArticleConfig(info jsonInfo) error {
+	weights := make(map[string]int, len(info.ZoneInfo))
+	for _, zone := range info.ZoneInfo {
+		if zone.Probability < 0 {
+			return fmt.Errorf("negative zone probability for %q", zone.Name)
+		}
+		weights[zone.Name] = zone.Probability
+	}
+	for _, name := range []string{"treasure", "pole", "fish", "waste"} {
+		if _, ok := weights[name]; !ok {
+			return fmt.Errorf("missing zone %q", name)
+		}
+	}
+	for _, typ := range []string{"treasure", "pole", "fish", "waste"} {
+		total := 0
+		for _, item := range info.ArticleInfo {
+			if item.Type == typ {
+				if item.Probability < 0 {
+					return fmt.Errorf("negative item probability for %q", item.Name)
+				}
+				total += item.Probability
+			}
+		}
+		if total != 100 {
+			return fmt.Errorf("item probabilities for %q sum to %d", typ, total)
+		}
+	}
+	return nil
+}
+
+func parsePoleOther(other string) (durable, maintenance, induce, favor int, err error) {
+	parts := strings.Split(other, "/")
+	if len(parts) != 4 {
+		return 0, 0, 0, 0, fmt.Errorf("invalid pole attributes %q", other)
+	}
+	values := []*int{&durable, &maintenance, &induce, &favor}
+	for i, part := range parts {
+		*values[i], err = strconv.Atoi(part)
+		if err != nil || *values[i] < 0 {
+			return 0, 0, 0, 0, fmt.Errorf("invalid pole attribute %q", other)
+		}
+	}
+	if maintenance > 10 || induce > 3 || favor > 3 {
+		return 0, 0, 0, 0, fmt.Errorf("pole attribute out of range %q", other)
+	}
+	return
 }
 
 type equip struct {
@@ -123,6 +235,7 @@ var (
 	discountList  = make(map[string]int, 50)              // 价格波动信息
 	enchantLevel  = []string{"0", "Ⅰ", "Ⅱ", "Ⅲ"}
 	dbdata        fishdb
+	itemID        atomic.Int64
 )
 
 var (
@@ -146,7 +259,7 @@ var (
 		PublicDataFolder: "McFish",
 	}).ApplySingle(ctxext.DefaultSingle)
 	getdb = fcext.DoOnceOnSuccess(func(ctx *zero.Ctx) bool {
-		dbdata.db = sql.New(engine.DataFolder() + "fishdata.db")
+		dbdata.db = sqlite.New(engine.DataFolder() + "fishdata.db")
 		err := dbdata.db.Open(time.Hour * 24)
 		if err != nil {
 			ctx.SendChain(message.Text("[ERROR at main.go.1]:", err))
@@ -172,34 +285,15 @@ func init() {
 	if err != nil {
 		panic(err)
 	}
-	probableList := make([]int, 4)
+	if err = validateArticleConfig(articlesInfo); err != nil {
+		panic(err)
+	}
+	zoneWeights := make(map[string]int, 4)
 	for _, info := range articlesInfo.ZoneInfo {
-		switch info.Name {
-		case "treasure":
-			probableList[0] = info.Probability
-		case "pole":
-			probableList[1] = info.Probability
-		case "fish":
-			probableList[2] = info.Probability
-		case "waste":
-			probableList[3] = info.Probability
-		}
+		zoneWeights[info.Name] = info.Probability
 	}
-	probabilities["treasure"] = probabilityLimit{
-		Min: 0,
-		Max: probableList[0],
-	}
-	probabilities["pole"] = probabilityLimit{
-		Min: probableList[0],
-		Max: probableList[1],
-	}
-	probabilities["fish"] = probabilityLimit{
-		Min: probableList[1],
-		Max: probableList[2],
-	}
-	probabilities["waste"] = probabilityLimit{
-		Min: probableList[2],
-		Max: probableList[3],
+	for name, limit := range buildZoneProbabilities(zoneWeights) {
+		probabilities[name] = limit
 	}
 	minMap := make(map[string]int, 4)
 	for _, info := range articlesInfo.ArticleInfo {
@@ -238,8 +332,11 @@ func (sql *fishdb) updateFishInfo(uid int64, number int) (residue int, err error
 	if err != nil {
 		return 0, err
 	}
-	_ = sql.db.Find("fishState", &userInfo, "WHERE ID = ?", uid)
-	if time.Unix(userInfo.Duration, 0).Day() != time.Now().Day() {
+	err = sql.db.Find("fishState", &userInfo, "WHERE ID = ?", uid)
+	if err != nil && err != sqlite.ErrNullResult {
+		return 0, err
+	}
+	if !sameLocalDate(userInfo.Duration, time.Now()) {
 		userInfo.Fish = 0
 		userInfo.Duration = time.Now().Unix()
 	}
@@ -271,7 +368,10 @@ func (sql *fishdb) updateCurseFor(uid int64, info string, number int) (err error
 	changeCheck := false
 	add := 0
 	buffName := "宝藏诅咒"
-	_ = sql.db.Find("fishState", &userInfo, "WHERE ID = ?", uid)
+	err = sql.db.Find("fishState", &userInfo, "WHERE ID = ?", uid)
+	if err != nil && err != sqlite.ErrNullResult {
+		return err
+	}
 	if info == "fish" {
 		userInfo.Bless += number
 		for userInfo.Bless >= 75 {
@@ -295,11 +395,13 @@ func (sql *fishdb) updateCurseFor(uid int64, info string, number int) (err error
 	if changeCheck {
 		table := strconv.FormatInt(uid, 10) + "Pack"
 		thing := article{
-			Duration: time.Now().Unix(),
+			Duration: nextItemID(),
 			Name:     buffName,
 			Type:     "treasure",
 		}
-		_ = sql.db.Find(table, &thing, "WHERE Name = ?", buffName)
+		if findErr := sql.db.Find(table, &thing, "WHERE Name = ?", buffName); findErr != nil && findErr != sqlite.ErrNullResult {
+			return findErr
+		}
 		thing.Number += add
 		return sql.db.Insert(table, &thing)
 	}
@@ -325,7 +427,7 @@ func (sql *fishdb) checkEquipFor(uid int64) (ok bool, err error) {
 	if err != nil {
 		return false, err
 	}
-	if userInfo.Equip > 3 {
+	if userInfo.Equip >= 3 {
 		return false, nil
 	}
 	return true, nil
@@ -339,7 +441,10 @@ func (sql *fishdb) setEquipFor(uid int64) (err error) {
 	if err != nil {
 		return err
 	}
-	_ = sql.db.Find("fishState", &userInfo, "WHERE ID = ?", uid)
+	err = sql.db.Find("fishState", &userInfo, "WHERE ID = ?", uid)
+	if err != nil && err != sqlite.ErrNullResult {
+		return err
+	}
 	userInfo.Equip++
 	return sql.db.Insert("fishState", &userInfo)
 }
@@ -356,6 +461,9 @@ func (sql *fishdb) getUserEquip(uid int64) (userInfo equip, err error) {
 		return
 	}
 	err = sql.db.Find("equips", &userInfo, "WHERE ID = ?", uid)
+	if err != nil && err != sqlite.ErrNullResult {
+		return userInfo, err
+	}
 	return
 }
 
@@ -396,7 +504,13 @@ func (sql *fishdb) pickFishFor(uid int64, number int) (fishNames map[string]int,
 	fishInfo := article{}
 	k := 0
 	for i := number; i > 0 && k < len(fishList); {
-		_ = sql.db.Find(name, &fishInfo, "WHERE Name = ?", fishList[k])
+		if findErr := sql.db.Find(name, &fishInfo, "WHERE Name = ?", fishList[k]); findErr != nil {
+			if findErr != sqlite.ErrNullResult {
+				return fishNames, findErr
+			}
+			k++
+			continue
+		}
 		if fishInfo.Number <= 0 {
 			k++
 			continue
@@ -557,9 +671,11 @@ func (sql *fishdb) refreshStroeInfo() (ok bool, err error) {
 		return false, err
 	}
 	lastTime := storeDiscount{}
-	_ = sql.db.Find("stroeDiscount", &lastTime, "WHERE Name = 'lastTime'")
+	if findErr := sql.db.Find("stroeDiscount", &lastTime, "WHERE Name = 'lastTime'"); findErr != nil && findErr != sqlite.ErrNullResult {
+		return false, findErr
+	}
 	refresh := false
-	timeNow := time.Now().Day()
+	timeNow := localDateKey(time.Now())
 	if timeNow != lastTime.Discount {
 		lastTime = storeDiscount{
 			Name:     "lastTime",
@@ -581,7 +697,9 @@ func (sql *fishdb) refreshStroeInfo() (ok bool, err error) {
 				Discount: thingDiscount,
 			}
 			thingInfo := store{}
-			_ = sql.db.Find("store", &thingInfo, "WHERE Name = ?", name)
+			if findErr := sql.db.Find("store", &thingInfo, "WHERE Name = ?", name); findErr != nil && findErr != sqlite.ErrNullResult {
+				return false, findErr
+			}
 			if thingInfo.Number > 150 {
 				// 控制价格浮动区间： -10%到10%
 				thing.Discount = 90 + rand.Intn(20)
@@ -591,7 +709,9 @@ func (sql *fishdb) refreshStroeInfo() (ok bool, err error) {
 				return
 			}
 		default:
-			_ = sql.db.Find("stroeDiscount", &thing, "WHERE Name = ?", name)
+			if findErr := sql.db.Find("stroeDiscount", &thing, "WHERE Name = ?", name); findErr != nil && findErr != sqlite.ErrNullResult {
+				return false, findErr
+			}
 		}
 		if thing.Discount != 0 {
 			discountList[name] = thing.Discount
@@ -599,27 +719,18 @@ func (sql *fishdb) refreshStroeInfo() (ok bool, err error) {
 			discountList[name] = 100
 		}
 	}
-	thing := store{}
-	var oldThing []store
-	_ = sql.db.FindFor("stroeDiscount", &thing, "WHERE type = 'pole'", func() error {
-		if time.Since(time.Unix(thing.Duration, 0)) > 24 {
-			oldThing = append(oldThing, thing)
-		}
-		return nil
-	})
-	for _, info := range oldThing {
-		_ = sql.db.Del("stroeDiscount", "WHERE Duration = ?", info.Duration)
-	}
 	if refresh {
 		// 每天调控1种鱼
 		fish := fishList[rand.Intn(len(fishList))]
 		thingInfo := store{
-			Duration: time.Now().Unix(),
+			Duration: nextItemID(),
 			Name:     fish,
 			Type:     "fish",
 			Price:    priceList[fish] * discountList[fish] / 100,
 		}
-		_ = sql.db.Find("store", &thingInfo, "WHERE Name = ?", fish)
+		if findErr := sql.db.Find("store", &thingInfo, "WHERE Name = ?", fish); findErr != nil && findErr != sqlite.ErrNullResult {
+			return false, findErr
+		}
 		thingInfo.Number += 100 - discountList[fish]
 		if thingInfo.Number < 1 {
 			thingInfo.Number = 100
@@ -627,18 +738,26 @@ func (sql *fishdb) refreshStroeInfo() (ok bool, err error) {
 		_ = sql.db.Insert("store", &thingInfo)
 		// 每天上架1木竿
 		thingInfo = store{
-			Duration: time.Now().Unix(),
+			Duration: nextItemID(),
 			Name:     "初始木竿",
 			Type:     "pole",
-			Price:    priceList["木竿"] + priceList["木竿"]*discountList["木竿"]/100,
+			Price:    priceList["木竿"] * discountList["木竿"] / 100,
 			Other:    "30/0/0/0",
 		}
-		_ = sql.db.Find("store", &thingInfo, "WHERE Name = '初始木竿'")
+		if findErr := sql.db.Find("store", &thingInfo, "WHERE Name = '初始木竿'"); findErr != nil && findErr != sqlite.ErrNullResult {
+			return false, findErr
+		}
 		thingInfo.Number++
 		if thingInfo.Number > 5 {
 			thingInfo.Number = 1
 		}
 		_ = sql.db.Insert("store", &thingInfo)
+		// 每日限量上架附魔书，价格与看板/交易统一使用当天折扣。
+		for _, book := range enchantBookRestockPlan() {
+			if err = sql.db.Insert("store", &book); err != nil {
+				return false, err
+			}
+		}
 	}
 	return true, nil
 }
@@ -693,10 +812,11 @@ func (sql *fishdb) getStoreThingInfo(thing string) (thingInfos []store, err erro
 }
 
 // 获取商店物品信息
-func (sql *fishdb) checkStoreFor(thing store, number int) (ok bool, err error) {
+func (sql *fishdb) checkStoreFor(thing store, number int) (current store, ok bool, err error) {
 	sql.Lock()
 	defer sql.Unlock()
-	err = sql.db.Create("store", &thing)
+	current = thing
+	err = sql.db.Create("store", &current)
 	if err != nil {
 		return
 	}
@@ -705,19 +825,19 @@ func (sql *fishdb) checkStoreFor(thing store, number int) (ok bool, err error) {
 		return
 	}
 	if count == 0 {
-		return false, nil
+		return current, false, nil
 	}
 	if !sql.db.CanFind("store", "WHERE Duration = ?", thing.Duration) {
-		return false, nil
+		return current, false, nil
 	}
-	err = sql.db.Find("store", &thing, "WHERE Duration = ?", thing.Duration)
+	err = sql.db.Find("store", &current, "WHERE Duration = ?", current.Duration)
 	if err != nil {
 		return
 	}
-	if thing.Number < number {
-		return false, nil
+	if current.Number < number {
+		return current, false, nil
 	}
-	return true, nil
+	return current, true, nil
 }
 
 // 更新商店信息
@@ -743,13 +863,35 @@ func (sql *fishdb) updateBuyTimeFor(uid int64, add int) (err error) {
 	if err != nil {
 		return err
 	}
-	_ = sql.db.Find("buff", &userInfo, "WHERE ID = ?", uid)
+	err = sql.db.Find("buff", &userInfo, "WHERE ID = ?", uid)
+	if err != nil && err != sqlite.ErrNullResult {
+		return err
+	}
 	userInfo.BuyTimes += add
 	if userInfo.BuyTimes > 20 {
 		userInfo.BuyTimes -= 20
 		userInfo.Coupon = 3
 	}
 	return sql.db.Insert("buff", &userInfo)
+}
+
+func (db *fishdb) getCouponFor(uid int64, times int) (int, error) {
+	if times < 1 {
+		return 0, nil
+	}
+	db.Lock()
+	defer db.Unlock()
+	userInfo := buffInfo{ID: uid}
+	if err := db.db.Create("buff", &userInfo); err != nil {
+		return 0, err
+	}
+	if err := db.db.Find("buff", &userInfo, "WHERE ID = ?", uid); err != nil && err != sqlite.ErrNullResult {
+		return 0, err
+	}
+	if userInfo.Coupon == 0 {
+		return -1, nil
+	}
+	return math.Min(userInfo.Coupon, times), nil
 }
 
 // 使用优惠卷
@@ -762,7 +904,10 @@ func (sql *fishdb) useCouponAt(uid int64, times int) (int, error) {
 	if err != nil {
 		return useTimes, err
 	}
-	_ = sql.db.Find("buff", &userInfo, "WHERE ID = ?", uid)
+	err = sql.db.Find("buff", &userInfo, "WHERE ID = ?", uid)
+	if err != nil && err != sqlite.ErrNullResult {
+		return useTimes, err
+	}
 	if userInfo.Coupon > 0 {
 		useTimes = math.Min(userInfo.Coupon, times)
 		userInfo.Coupon -= useTimes
@@ -771,7 +916,7 @@ func (sql *fishdb) useCouponAt(uid int64, times int) (int, error) {
 }
 
 // 买卖上限检测
-func (sql *fishdb) checkCanSalesFor(uid int64, saleName string, salesNum int) (int, error) {
+func (sql *fishdb) checkCanSalesFor(uid int64, saleName string, salesNum int, purchase bool) (int, error) {
 	sql.Lock()
 	defer sql.Unlock()
 	userInfo := buffInfo{ID: uid}
@@ -779,8 +924,15 @@ func (sql *fishdb) checkCanSalesFor(uid int64, saleName string, salesNum int) (i
 	if err != nil {
 		return salesNum, err
 	}
-	_ = sql.db.Find("buff", &userInfo, "WHERE ID = ?", uid)
-	if time.Now().Day() != time.Unix(userInfo.Duration, 0).Day() {
+	err = sql.db.Find("buff", &userInfo, "WHERE ID = ?", uid)
+	if err == sqlite.ErrNullResult {
+		// A first-time buyer has no buff row yet. Treat that as a clean,
+		// uninitialized state and persist the daily transaction record below.
+		err = nil
+	} else if err != nil {
+		return salesNum, err
+	}
+	if !sameLocalDate(userInfo.Duration, time.Now()) {
 		userInfo.Duration = time.Now().Unix()
 		userInfo.SalesPole = 0
 		userInfo.BuyTing = 0
@@ -793,7 +945,7 @@ func (sql *fishdb) checkCanSalesFor(uid int64, saleName string, salesNum int) (i
 		if userInfo.SalesPole >= 10 {
 			salesNum = -1
 		}
-	} else if !checkIsWaste(saleName) {
+	} else if purchase && !checkIsWaste(saleName) {
 		maxSales := 30 - userInfo.BuyTing
 		if maxSales < 0 {
 			salesNum = 0
@@ -807,7 +959,7 @@ func (sql *fishdb) checkCanSalesFor(uid int64, saleName string, salesNum int) (i
 }
 
 // 更新买卖鱼上限，假定sales变量已经在 checkCanSalesFor 进行了防护
-func (sql *fishdb) updateCanSalesFor(uid int64, saleName string, sales int) error {
+func (sql *fishdb) updateCanSalesFor(uid int64, saleName string, sales int, purchase bool) error {
 	sql.Lock()
 	defer sql.Unlock()
 	userInfo := buffInfo{ID: uid}
@@ -815,16 +967,102 @@ func (sql *fishdb) updateCanSalesFor(uid int64, saleName string, sales int) erro
 	if err != nil {
 		return err
 	}
-	_ = sql.db.Find("buff", &userInfo, "WHERE ID = ?", uid)
+	err = sql.db.Find("buff", &userInfo, "WHERE ID = ?", uid)
+	if err != nil && err != sqlite.ErrNullResult {
+		return err
+	}
 	if strings.Contains(saleName, "竿") {
 		userInfo.SalesPole++
-	} else if !checkIsWaste(saleName) {
+	} else if purchase && !checkIsWaste(saleName) {
 		userInfo.BuyTing += sales
 	}
 	return sql.db.Insert("buff", &userInfo)
 }
 
 // 检测物品是否是垃圾
+func expandPoleArticles(articles []article) []article {
+	units := make([]article, 0, len(articles))
+	for _, info := range articles {
+		for i := 0; i < info.Number; i++ {
+			unit := info
+			unit.Number = 1
+			units = append(units, unit)
+		}
+	}
+	return units
+}
+
+func (db *fishdb) consumePoleUnits(uid int64, units []article) error {
+	counts := make(map[int64]int, len(units))
+	for _, unit := range units {
+		counts[unit.Duration]++
+	}
+	updated := make([]article, 0, len(counts))
+	for duration, count := range counts {
+		current, err := db.getUserThingByDuration(uid, duration)
+		if err != nil {
+			for _, previous := range updated {
+				_ = db.updateUserThingInfo(uid, previous)
+			}
+			return err
+		}
+		if current.Number < count {
+			for _, previous := range updated {
+				_ = db.updateUserThingInfo(uid, previous)
+			}
+			return fmt.Errorf("pole material %d is no longer available", duration)
+		}
+		previous := current
+		current.Number -= count
+		if err := db.updateUserThingInfo(uid, current); err != nil {
+			for _, old := range updated {
+				_ = db.updateUserThingInfo(uid, old)
+			}
+			return err
+		}
+		updated = append(updated, previous)
+	}
+	return nil
+}
+
+func (db *fishdb) restorePoleUnits(uid int64, units []article) error {
+	counts := make(map[int64]int, len(units))
+	snapshots := make(map[int64]article, len(units))
+	for _, unit := range units {
+		counts[unit.Duration]++
+		snapshots[unit.Duration] = unit
+	}
+	for duration, count := range counts {
+		current, err := db.getUserThingByDuration(uid, duration)
+		if err == sqlite.ErrNullResult {
+			current = snapshots[duration]
+			current.Number = count
+		} else if err != nil {
+			return err
+		} else {
+			current.Number += count
+		}
+		if err := db.updateUserThingInfo(uid, current); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (db *fishdb) getUserThingByDuration(uid, duration int64) (article, error) {
+	name := strconv.FormatInt(uid, 10) + "Pack"
+	db.Lock()
+	defer db.Unlock()
+	info := article{}
+	if err := db.db.Create(name, &info); err != nil {
+		return info, err
+	}
+	if err := db.db.Find(name, &info, "WHERE Duration = ?", duration); err != nil {
+		return info, err
+	}
+	return info, nil
+}
+
 func checkIsWaste(thing string) bool {
 	for _, v := range wasteList {
 		if v == thing {
@@ -832,4 +1070,17 @@ func checkIsWaste(thing string) bool {
 		}
 	}
 	return false
+}
+
+func nextItemID() int64 {
+	now := time.Now().UnixNano()
+	for {
+		previous := itemID.Load()
+		if now <= previous {
+			now = previous + 1
+		}
+		if itemID.CompareAndSwap(previous, now) {
+			return now
+		}
+	}
 }

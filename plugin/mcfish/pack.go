@@ -42,11 +42,13 @@ func init() {
 		}
 		ctx.SendChain(message.ImageBytes(pic))
 	})
-	engine.OnRegex(`^消除(绑定|宝藏)诅咒(\d*)$`, getdb).SetBlock(true).Limit(ctxext.LimitByUser).Handle(func(ctx *zero.Ctx) {
+	engine.OnRegex(`^消除(绑定|宝藏)诅咒\s*(\d*)$`, getdb).SetBlock(true).Limit(ctxext.LimitByUser).Handle(func(ctx *zero.Ctx) {
 		uid := ctx.Event.UserID
-		number, _ := strconv.Atoi(ctx.State["regex_matched"].([]string)[2])
-		if number == 0 {
-			number = 1
+		defer lockUser(uid)()
+		number, countErr := parseCount(ctx.State["regex_matched"].([]string)[2])
+		if countErr != nil {
+			ctx.SendChain(message.Text("请输入正确的数量"))
+			return
 		}
 		number1, err := dbdata.getNumberFor(uid, "宝藏诅咒")
 		if err != nil {
@@ -74,6 +76,7 @@ func init() {
 			ctx.SendChain(message.Text("[ERROR at store.go.3.3]:", err))
 			return
 		}
+		purifierBefore := articles[0]
 		articles[0].Number -= number
 		err = dbdata.updateUserThingInfo(uid, articles[0])
 		if err != nil {
@@ -82,12 +85,16 @@ func init() {
 		}
 		articles, err = dbdata.getUserThingInfo(uid, "宝藏诅咒")
 		if err != nil {
+			_ = dbdata.updateUserThingInfo(uid, purifierBefore)
 			ctx.SendChain(message.Text("消除失败,净化书销毁了\n[ERROR at store.go.3.5]:", err))
 			return
 		}
+		curseBefore := articles[0]
 		articles[0].Number -= number
 		err = dbdata.updateUserThingInfo(uid, articles[0])
 		if err != nil {
+			_ = dbdata.updateUserThingInfo(uid, purifierBefore)
+			_ = dbdata.updateUserThingInfo(uid, curseBefore)
 			ctx.SendChain(message.Text("[ERROR at store.go.3.5]:", err))
 			return
 		}
@@ -107,18 +114,11 @@ func init() {
 		}
 		msg := make(message.Message, 0, 20+len(thingList))
 		msg = append(msg, message.At(uid), message.Text("\n大类概率:\n"))
-		probableList := make([]int, 4)
-		for _, info := range articlesInfo.ZoneInfo {
-			switch info.Name {
-			case "treasure":
-				probableList[0] = info.Probability
-			case "pole":
-				probableList[1] = info.Probability
-			case "fish":
-				probableList[2] = info.Probability
-			case "waste":
-				probableList[3] = info.Probability
-			}
+		probableList := []int{
+			probabilities["treasure"].Max - probabilities["treasure"].Min,
+			probabilities["pole"].Max - probabilities["pole"].Min,
+			probabilities["fish"].Max - probabilities["fish"].Min,
+			probabilities["waste"].Max - probabilities["waste"].Min,
 		}
 		if number > 100 || equipInfo.Equip == "美西螈" { // 放大概率
 			probableList = []int{2, 8, 35, 45}
@@ -137,6 +137,8 @@ func init() {
 		msg = append(msg, message.Text("鱼类 : ", probableList[2], "%\n"))
 		probable += probableList[3]
 		msg = append(msg, message.Text("垃圾 : ", probableList[3], "%\n"))
+		msg = append(msg, message.Text("空竿 : ", 100-probable, "%\n"))
+		probable += 100 - probable
 		msg = append(msg, message.Text("合计 : ", probable, "%\n"))
 		msg = append(msg, message.Text("-----------\n宝藏概率:\n"))
 		for _, name := range treasureList {
@@ -179,18 +181,18 @@ func init() {
 			"当前装备概率明细\n" +
 			"规则V" + version + ":\n" +
 			"1.每日的商店价格是波动的!!如何最大化收益自己考虑一下喔\n" +
-			"2.装备信息:\n-> 木竿 : 耐久上限:30 均价:100 上钩概率:0.7%\n-> 铁竿 : 耐久上限:50 均价:300 上钩概率:0.2%\n-> 金竿 : 耐久上限:70 均价700 上钩概率:0.06%\n" +
-			"-> 钻石竿 : 耐久上限:100 均价1500 上钩概率:0.03%\n-> 下界合金竿 : 耐久上限:150 均价3100 上钩概率:0.01%\n-> 三叉戟 : 可使1次钓鱼视为3次钓鱼. 耐久上限:300 均价4000 只能合成、修复和交易\n" +
+			"2.装备信息:\n-> 木竿 : 耐久上限:30 均价:100 上钩概率:2.80%\n-> 铁竿 : 耐久上限:50 均价:300 上钩概率:0.80%\n-> 金竿 : 耐久上限:70 均价700 上钩概率:0.24%\n" +
+			"-> 钻石竿 : 耐久上限:100 均价1500 上钩概率:0.12%\n-> 下界合金竿 : 耐久上限:150 均价3100 上钩概率:0.04%\n-> 三叉戟 : 可使1次钓鱼视为3次钓鱼. 耐久上限:300 均价4000 只能合成、修复和交易\n" +
 			"3.附魔书信息:\n-> 诱钓 : 减少上钩时间. 均价:1000, 上钩概率:0.25%\n-> 海之眷顾 : 增加宝藏上钩概率. 均价:2500, 上钩概率:0.10%\n" +
 			"4.稀有物品:\n-> 唱片 : 出售物品时使用该物品使价格翻倍. 均价:3000, 上钩概率:0.01%\n" +
 			"-> 美西螈 : 可装备,获得隐形[钓鱼佬]buff,并让钓到除鱼竿和美西螈外的物品数量变成5,无耐久上限.不可修复/附魔,每次钓鱼消耗3条鱼. 均价:3000, 上钩概率:0.01%\n" +
 			"-> 海豚 : 使空竿概率变成垃圾概率. 均价:1000, 上钩概率:0.19%\n" +
 			"-> 宝藏诅咒 : 无法交易,每一层就会增加购买时10%价格和减少出售时10%价格(超过10层会变为倒贴钱). 上钩概率:0.25%\n-> 净化书 : 用于消除宝藏诅咒. 均价:5000, 上钩概率:0.19%\n" +
-			"5.鱼类信息:\n-> 鳕鱼 : 均价:10 上钩概率:0.69%\n-> 鲑鱼 : 均价:50 上钩概率:0.2%\n-> 热带鱼 : 均价:100 上钩概率:0.06%\n-> 河豚 : 均价:300 上钩概率:0.03%\n-> 鹦鹉螺 : 均价:500 上钩概率:0.01%\n-> 墨鱼 : 均价:500 上钩概率:0.01%\n" +
+			"5.鱼类信息:\n-> 鳕鱼 : 均价:10 上钩概率:17.25%\n-> 鲑鱼 : 均价:50 上钩概率:5.00%\n-> 热带鱼 : 均价:100 上钩概率:1.50%\n-> 河豚 : 均价:300 上钩概率:0.75%\n-> 鹦鹉螺 : 均价:500 上钩概率:0.25%\n-> 墨鱼 : 均价:500 上钩概率:0.25%\n" +
 			"6.垃圾:\n-> 均价:10 上钩概率:30%\n" +
 			"7.物品BUFF:\n-> 钓鱼佬 : 当背包名字含有'鱼'的物品数量超过100时激活,钓到物品概率提高至90%\n-> 修复大师 : 当背包鱼竿数量超过10时激活,修复物品时耐久百分百继承\n" +
 			"8.合成:\n-> 铁竿 : 3x木竿\n-> 金竿 : 3x铁竿\n-> 钻石竿 : 3x金竿\n-> 下界合金竿 : 3x钻石竿\n-> 三叉戟 : 3x下界合金竿\n注:合成成功率90%(包括梭哈),合成鱼竿的附魔等级=（附魔等级合/合成鱼竿数量）\n" +
-			"9.杂项:\n-> 无装备的情况下,每人最多可以购买3次100块钱的鱼竿,商店每日会上架1木竿\n-> 默认状态钓鱼上钩概率为60%(理论值!!!)\n-> 附魔的鱼竿会因附魔变得昂贵,每个附魔最高3级\n-> 三叉戟不算鱼竿,修复时可直接满耐久\n" +
+			"9.杂项:\n-> 无装备的情况下,每人最多可以购买3次100块钱的鱼竿,商店每日会上架1木竿\n-> 默认状态钓鱼上钩概率为60%(理论值!!!),其中宝藏1%、鱼竿4%、鱼类25%、垃圾30%,其余为空竿\n-> 附魔的鱼竿会因附魔变得昂贵,每个附魔最高3级\n-> 三叉戟不算鱼竿,修复时可直接满耐久\n" +
 			"-> 鱼竿数量大于50的不能买东西;\n     鱼竿数量大于30的不能钓鱼;\n     每购/售10次鱼竿获得1层宝藏诅咒;\n     每购买20次物品将获得3次价格减半福利;\n     每钓鱼75次获得1本净化书;\n" +
 			"     每天可交易鱼竿10个，购买物品30件（垃圾除外）."
 
@@ -198,8 +200,30 @@ func init() {
 	})
 }
 
-func drawPackImage(uid int64, equipInfo equip, articles []article) (imagePicByte []byte, err error) {
-	fontdata, err := file.GetLazyData(text.BoldFontFile, control.Md5File, true)
+func loadPackFont() ([]byte, error) {
+	return file.GetLazyData(text.BoldFontFile, control.Md5File, true)
+}
+
+func loadEquipIcon(name string) (image.Image, error) {
+	data, err := engine.GetLazyData(name+".png", false)
+	if err != nil {
+		return nil, err
+	}
+	icon, _, err := image.Decode(bytes.NewReader(data))
+	if err != nil {
+		return nil, err
+	}
+	return icon, nil
+}
+
+func drawPackImage(uid int64, equipInfo equip, articles []article) ([]byte, error) {
+	return drawPackImageWithLoaders(uid, equipInfo, articles, loadPackFont, loadEquipIcon)
+}
+
+func drawPackImageWithLoaders(uid int64, equipInfo equip, articles []article,
+	fontLoader func() ([]byte, error), iconLoader func(string) (image.Image, error),
+) (imagePicByte []byte, err error) {
+	fontdata, err := fontLoader()
 	if err != nil {
 		return nil, err
 	}
@@ -207,18 +231,17 @@ func drawPackImage(uid int64, equipInfo equip, articles []article) (imagePicByte
 		wg         sync.WaitGroup
 		equipBlock image.Image // 装备信息
 		packBlock  image.Image // 背包信息
+		equipErr   error
+		packErr    error
 	)
 	wg.Add(1)
 	// 绘制ID
 	go func() {
 		defer wg.Done()
 		if equipInfo == (equip{}) {
-			equipBlock, err = drawEquipEmptyBlock(fontdata)
+			equipBlock, equipErr = drawEquipEmptyBlock(fontdata)
 		} else {
-			equipBlock, err = drawEquipInfoBlock(equipInfo, fontdata)
-		}
-		if err != nil {
-			return
+			equipBlock, equipErr = drawEquipInfoBlockWithIconLoader(equipInfo, fontdata, iconLoader)
 		}
 	}()
 	wg.Add(1)
@@ -226,18 +249,20 @@ func drawPackImage(uid int64, equipInfo equip, articles []article) (imagePicByte
 	go func() {
 		defer wg.Done()
 		if len(articles) == 0 {
-			packBlock, err = drawArticleEmptyBlock(fontdata)
+			packBlock, packErr = drawArticleEmptyBlock(fontdata)
 		} else {
-			packBlock, err = drawArticleInfoBlock(uid, articles, fontdata)
-		}
-		if err != nil {
-			return
+			packBlock, packErr = drawArticleInfoBlock(uid, articles, fontdata)
 		}
 	}()
 	wg.Wait()
+	if equipErr != nil {
+		return nil, equipErr
+	}
+	if packErr != nil {
+		return nil, packErr
+	}
 	if equipBlock == nil || packBlock == nil {
-		err = errors.New("生成图片失败,数据缺失")
-		return
+		return nil, errors.New("生成图片失败,数据缺失")
 	}
 	// 计算图片高度
 	backDX := 1020
@@ -289,6 +314,12 @@ func drawEquipEmptyBlock(fontdata []byte) (image.Image, error) {
 	return canvas.Image(), nil
 }
 func drawEquipInfoBlock(equipInfo equip, fontdata []byte) (image.Image, error) {
+	return drawEquipInfoBlockWithIconLoader(equipInfo, fontdata, loadEquipIcon)
+}
+
+func drawEquipInfoBlockWithIconLoader(equipInfo equip, fontdata []byte,
+	iconLoader func(string) (image.Image, error),
+) (image.Image, error) {
 	canvas := gg.NewContext(1, 1)
 	err := canvas.ParseFontFace(fontdata, 100)
 	if err != nil {
@@ -313,17 +344,11 @@ func drawEquipInfoBlock(equipInfo equip, fontdata []byte) (image.Image, error) {
 	canvas.SetLineWidth(3)
 	canvas.SetRGBA255(0, 0, 0, 255)
 	canvas.Stroke()
-	getAvatar, err := engine.GetLazyData(equipInfo.Equip+".png", false)
-	if err != nil {
-		return nil, err
-	}
-	equipPic, _, err := image.Decode(bytes.NewReader(getAvatar))
-	if err != nil {
-		return nil, err
-	}
 	picDy := float64(backDY) - 10 - titleH*2
-	equipPic = factory.Size(equipPic, int(picDy)-10, int(picDy)-10).Image()
-	canvas.DrawImage(equipPic, 10, 10+int(titleH)*2)
+	if equipPic, iconErr := iconLoader(equipInfo.Equip); iconErr == nil && equipPic != nil {
+		equipPic = factory.Size(equipPic, int(picDy)-10, int(picDy)-10).Image()
+		canvas.DrawImage(equipPic, 10, 10+int(titleH)*2)
+	}
 
 	// 放字
 	canvas.SetColor(color.Black)

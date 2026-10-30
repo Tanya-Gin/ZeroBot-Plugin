@@ -15,6 +15,7 @@ import (
 func init() {
 	engine.OnRegex(`^装备(`+strings.Join(poleList, "|")+`)$`, getdb).SetBlock(true).Limit(ctxext.LimitByUser).Handle(func(ctx *zero.Ctx) {
 		uid := ctx.Event.UserID
+		defer lockUser(uid)()
 		equipInfo, err := dbdata.getUserEquip(uid)
 		if err != nil {
 			ctx.SendChain(message.Text("[ERROR at pole.go.1]:", err))
@@ -33,11 +34,11 @@ func init() {
 		poles := make([]equip, 0, len(articles))
 		if thingName != "美西螈" {
 			for _, info := range articles {
-				poleInfo := strings.Split(info.Other, "/")
-				durable, _ := strconv.Atoi(poleInfo[0])
-				maintenance, _ := strconv.Atoi(poleInfo[1])
-				induceLevel, _ := strconv.Atoi(poleInfo[2])
-				favorLevel, _ := strconv.Atoi(poleInfo[3])
+				durable, maintenance, induceLevel, favorLevel, parseErr := parsePoleOther(info.Other)
+				if parseErr != nil {
+					ctx.SendChain(message.Text("[ERROR at pole.go.2]:", parseErr))
+					return
+				}
 				poles = append(poles, equip{
 					ID:          uid,
 					Equip:       info.Name,
@@ -69,7 +70,7 @@ func init() {
 			msg = append(msg, message.Text("- 鱼竿数量请使用钓鱼背包查看"))
 			ctx.Send(msg)
 			// 等待用户下一步选择
-			recv, cancel := zero.NewFutureEvent("message", 999, false, zero.RegexRule(`^(取消|\d+)$`), zero.CheckUser(ctx.Event.UserID)).Repeat()
+			recv, cancel := zero.NewFutureEvent("message", 999, false, zero.RegexRule(`^(取消|\d+)$`), zero.CheckUser(ctx.Event.UserID), zero.CheckGroup(ctx.Event.GroupID)).Repeat()
 			defer cancel()
 			for {
 				select {
@@ -91,7 +92,7 @@ func init() {
 						return
 					}
 					index, err = strconv.Atoi(nextcmd)
-					if err != nil || index > len(articles)-1 {
+					if err != nil || index < 0 || index > len(articles)-1 {
 						ctx.SendChain(message.At(ctx.Event.UserID), message.Text("请输入正确的序号"))
 						continue
 					}
@@ -104,6 +105,7 @@ func init() {
 		}
 		newEquipInfo := poles[index]
 		packEquip := articles[index]
+		packEquipBefore := packEquip
 		packEquip.Number--
 		err = dbdata.updateUserThingInfo(uid, packEquip)
 		if err != nil {
@@ -112,13 +114,14 @@ func init() {
 		}
 		err = dbdata.updateUserEquip(newEquipInfo)
 		if err != nil {
+			_ = dbdata.updateUserThingInfo(uid, packEquipBefore)
 			ctx.SendChain(message.Text("[ERROR at pole.go.3.1]:", err))
 			return
 		}
 		oldthing := article{}
 		if equipInfo != (equip{}) && equipInfo.Equip != "美西螈" {
 			oldthing = article{
-				Duration: time.Now().Unix(),
+				Duration: nextItemID(),
 				Type:     "pole",
 				Name:     equipInfo.Equip,
 				Number:   1,
@@ -132,7 +135,7 @@ func init() {
 			}
 			if len(articles) == 0 {
 				oldthing = article{
-					Duration: time.Now().Unix(),
+					Duration: nextItemID(),
 					Type:     "pole",
 					Name:     equipInfo.Equip,
 					Number:   1,
@@ -144,6 +147,8 @@ func init() {
 		}
 		err = dbdata.updateUserThingInfo(uid, oldthing)
 		if err != nil {
+			_ = dbdata.updateUserEquip(equipInfo)
+			_ = dbdata.updateUserThingInfo(uid, packEquipBefore)
 			ctx.SendChain(message.Text("[ERROR at pole.go.4]:", err))
 			return
 		}
@@ -155,6 +160,7 @@ func init() {
 	})
 	engine.OnFullMatchGroup([]string{"修复鱼竿", "维修鱼竿"}, getdb).SetBlock(true).Limit(ctxext.LimitByUser).Handle(func(ctx *zero.Ctx) {
 		uid := ctx.Event.UserID
+		defer lockUser(uid)()
 		equipInfo, err := dbdata.getUserEquip(uid)
 		if err != nil {
 			ctx.SendChain(message.Text("[ERROR at pole.go.5]:", err))
@@ -179,11 +185,11 @@ func init() {
 		}
 		poles := make([]equip, 0, len(articles))
 		for _, info := range articles {
-			poleInfo := strings.Split(info.Other, "/")
-			durable, _ := strconv.Atoi(poleInfo[0])
-			maintenance, _ := strconv.Atoi(poleInfo[1])
-			induceLevel, _ := strconv.Atoi(poleInfo[2])
-			favorLevel, _ := strconv.Atoi(poleInfo[3])
+			durable, maintenance, induceLevel, favorLevel, parseErr := parsePoleOther(info.Other)
+			if parseErr != nil {
+				ctx.SendChain(message.Text("[ERROR at pole.go]:", parseErr))
+				return
+			}
 			poles = append(poles, equip{
 				ID:          uid,
 				Equip:       info.Name,
@@ -205,7 +211,7 @@ func init() {
 			msg = append(msg, message.Text("————————\n输入对应序号进行修复,或回复“取消”取消"))
 			ctx.Send(message.ReplyWithMessage(ctx.Event.MessageID, msg...))
 			// 等待用户下一步选择
-			recv, cancel := zero.NewFutureEvent("message", 999, false, zero.RegexRule(`^(取消|\d+)$`), zero.CheckUser(ctx.Event.UserID)).Repeat()
+			recv, cancel := zero.NewFutureEvent("message", 999, false, zero.RegexRule(`^(取消|\d+)$`), zero.CheckUser(ctx.Event.UserID), zero.CheckGroup(ctx.Event.GroupID)).Repeat()
 			defer cancel()
 			for {
 				select {
@@ -227,7 +233,7 @@ func init() {
 						return
 					}
 					index, err = strconv.Atoi(nextcmd)
-					if err != nil || index > len(articles)-1 {
+					if err != nil || index < 0 || index > len(articles)-1 {
 						ctx.SendChain(message.At(ctx.Event.UserID), message.Text("请输入正确的序号"))
 						continue
 					}
@@ -269,11 +275,15 @@ func init() {
 			msg += ",海之眷顾等级提升至" + enchantLevel[equipInfo.Favor]
 		}
 		thingInfo := articles[index]
+		thingInfoBefore := thingInfo
 		thingInfo.Number = 0
 		err = dbdata.updateUserThingInfo(uid, thingInfo)
 		if err == nil {
 			equipInfo.Maintenance++
 			err = dbdata.updateUserEquip(equipInfo)
+			if err != nil {
+				_ = dbdata.updateUserThingInfo(uid, thingInfoBefore)
+			}
 		}
 		if err != nil {
 			ctx.SendChain(message.Text("[ERROR at pole.go.7]:", err))
@@ -287,6 +297,7 @@ func init() {
 	})
 	engine.OnRegex(`^附魔(诱钓|海之眷顾)$`, getdb).SetBlock(true).Limit(ctxext.LimitByUser).Handle(func(ctx *zero.Ctx) {
 		uid := ctx.Event.UserID
+		defer lockUser(uid)()
 		equipInfo, err := dbdata.getUserEquip(uid)
 		if err != nil {
 			ctx.SendChain(message.Text("[ERROR at pole.go.7]:", err))
@@ -307,36 +318,42 @@ func init() {
 			return
 		}
 		bookInfo := books[0]
+		bookInfoBefore := bookInfo
+		atLevelCap := false
+		switch book {
+		case "诱钓":
+			atLevelCap = equipInfo.Induce >= 3
+		case "海之眷顾":
+			atLevelCap = equipInfo.Favor >= 3
+		default:
+			ctx.SendChain(message.Text("附魔失败了"))
+			return
+		}
+		if atLevelCap {
+			ctx.SendChain(message.Text(book, "等级已达到上限，不消耗附魔书"))
+			return
+		}
+		if !shouldConsumeEnchantBook(rand.Intn(100) <= 50, atLevelCap) {
+			ctx.SendChain(message.Text("附魔失败了，附魔书未消耗"))
+			return
+		}
+
+		number := 0
+		switch book {
+		case "诱钓":
+			equipInfo.Induce++
+			number = equipInfo.Induce
+		case "海之眷顾":
+			equipInfo.Favor++
+			number = equipInfo.Favor
+		}
 		bookInfo.Number--
 		err = dbdata.updateUserThingInfo(uid, bookInfo)
-		number := 0
 		if err == nil {
-			if rand.Intn(100) > 50 {
-				ctx.SendChain(message.Text("附魔失败了"))
-				return
-			}
-			switch book {
-			case "诱钓":
-				equipInfo.Induce++
-				if equipInfo.Induce > 3 {
-					ctx.SendChain(message.Text("诱钓等级已达到上限，你浪费了一本附魔书"))
-					return
-				}
-				number = equipInfo.Induce
-			case "海之眷顾":
-				equipInfo.Favor++
-				if equipInfo.Favor > 3 {
-					ctx.SendChain(message.Text("海之眷顾等级已达到上限，你浪费了一本附魔书"))
-					return
-				}
-				number = equipInfo.Favor
-			default:
-				ctx.SendChain(message.Text("附魔失败了"))
-				return
-			}
 			err = dbdata.updateUserEquip(equipInfo)
 		}
 		if err != nil {
+			_ = dbdata.updateUserThingInfo(uid, bookInfoBefore)
 			ctx.SendChain(message.Text("[ERROR at pole.go.9]:", err))
 			return
 		}
@@ -344,6 +361,7 @@ func init() {
 	})
 	engine.OnRegex(`^合成(.+竿|三叉戟)$`, getdb).SetBlock(true).Limit(ctxext.LimitByUser).Handle(func(ctx *zero.Ctx) {
 		uid := ctx.Event.UserID
+		defer lockUser(uid)()
 		thingList := []string{"木竿", "铁竿", "金竿", "钻石竿", "下界合金竿", "三叉戟"}
 		thingName := ctx.State["regex_matched"].([]string)[1]
 		indexOfMaterial := -1
@@ -361,18 +379,19 @@ func init() {
 			ctx.SendChain(message.Text("[ERROR at pole.go.10]:", err))
 			return
 		}
-		maxCount := len(articles)
+		units := expandPoleArticles(articles)
+		maxCount := len(units)
 		if maxCount < 3 {
 			ctx.SendChain(message.Reply(ctx.Event.MessageID), message.Text("你的合成材料不足"))
 			return
 		}
 		poles := make([]equip, 0, maxCount)
-		for _, info := range articles {
-			poleInfo := strings.Split(info.Other, "/")
-			durable, _ := strconv.Atoi(poleInfo[0])
-			maintenance, _ := strconv.Atoi(poleInfo[1])
-			induceLevel, _ := strconv.Atoi(poleInfo[2])
-			favorLevel, _ := strconv.Atoi(poleInfo[3])
+		for _, info := range units {
+			durable, maintenance, induceLevel, favorLevel, parseErr := parsePoleOther(info.Other)
+			if parseErr != nil {
+				ctx.SendChain(message.Text("[ERROR at pole.go]:", parseErr))
+				return
+			}
 			poles = append(poles, equip{
 				ID:          uid,
 				Equip:       info.Name,
@@ -384,8 +403,8 @@ func init() {
 		}
 		list := []int{0, 1, 2}
 		check := false
-		if len(articles) > 3 {
-			msg := make(message.Message, 0, 3+len(articles))
+		if maxCount > 3 {
+			msg := make(message.Message, 0, 3+maxCount)
 			msg = append(msg, message.Text("找到以下鱼竿:\n"))
 			for i, info := range poles {
 				msg = append(msg, message.Text("[", i, "] ", info.Equip, " : 耐", info.Durable, "/修", info.Maintenance,
@@ -397,7 +416,7 @@ func init() {
 			msg = append(msg, message.Text("- 输入“梭哈“，合成所有鱼竿"))
 			ctx.Send(message.ReplyWithMessage(ctx.Event.MessageID, msg...))
 			// 等待用户下一步选择
-			recv, cancel := zero.NewFutureEvent("message", 999, false, zero.RegexRule(`^(梭哈|取消|\d+ \d+ \d+)$`), zero.CheckUser(ctx.Event.UserID)).Repeat()
+			recv, cancel := zero.NewFutureEvent("message", 999, false, zero.RegexRule(`^(梭哈|取消|\d+ \d+ \d+)$`), zero.CheckUser(ctx.Event.UserID), zero.CheckGroup(ctx.Event.GroupID)).Repeat()
 			defer cancel()
 			for {
 				select {
@@ -433,19 +452,14 @@ func init() {
 							}
 							avgInduce := sumInduce / 3
 							avgFavor := sumFavor / 3
-							for _, idx := range indices {
-								thingInfo := articles[idx]
-								thingInfo.Number = 0
-								err = dbdata.updateUserThingInfo(uid, thingInfo)
-								if err != nil {
-									ctx.SendChain(message.Text("[ERROR at pole.go.12]:", err))
-									return
-								}
+							if err = dbdata.consumePoleUnits(uid, []article{units[indices[0]], units[indices[1]], units[indices[2]]}); err != nil {
+								ctx.SendChain(message.Text("[ERROR at pole.go.12]:", err))
+								return
 							}
 							if rand.Intn(100) < 90 {
 								attribute := strconv.Itoa(durationList[thingName]) + "/0/" + strconv.Itoa(avgInduce) + "/" + strconv.Itoa(avgFavor)
 								newthing := article{
-									Duration: time.Now().Unix() + int64(batch*10),
+									Duration: nextItemID(),
 									Type:     "pole",
 									Name:     thingName,
 									Number:   1,
@@ -453,6 +467,7 @@ func init() {
 								}
 								err = dbdata.updateUserThingInfo(uid, newthing)
 								if err != nil {
+									_ = dbdata.restorePoleUnits(uid, []article{units[indices[0]], units[indices[1]], units[indices[2]]})
 									ctx.SendChain(message.Text("[ERROR at pole.go.12]:", err))
 									return
 								}
@@ -494,7 +509,7 @@ func init() {
 						ctx.SendChain(message.At(ctx.Event.UserID), message.Text("[0]请输入正确的序号\n", list))
 						continue
 					}
-					if first >= maxCount || second >= maxCount || third >= maxCount {
+					if first < 0 || second < 0 || third < 0 || first >= maxCount || second >= maxCount || third >= maxCount {
 						ctx.SendChain(message.At(ctx.Event.UserID), message.Text("[", maxCount, "]请输入正确的序号\n", list))
 						continue
 					}
@@ -505,19 +520,23 @@ func init() {
 				}
 			}
 		}
-		upgradeNum := len(list)
+		selectedUnits := []article{units[list[0]], units[list[1]], units[list[2]]}
+		if err = dbdata.consumePoleUnits(uid, selectedUnits); err != nil {
+			ctx.SendChain(message.Text("[ERROR at pole.go.12]:", err))
+			return
+		}
+		upgradeNum := len(selectedUnits)
 		favorLevel := 0
 		induceLevel := 0
-		for _, index := range list {
-			thingInfo := articles[index]
-			thingInfo.Number = 0
-			err = dbdata.updateUserThingInfo(uid, thingInfo)
-			if err != nil {
-				ctx.SendChain(message.Text("[ERROR at pole.go.12]:", err))
-				return
-			}
-			favorLevel += poles[index].Favor
-			induceLevel += poles[index].Induce
+		for _, unit := range selectedUnits {
+			favorLevel += func() int {
+				_, _, _, favor, _ := parsePoleOther(unit.Other)
+				return favor
+			}()
+			induceLevel += func() int {
+				_, _, induce, _, _ := parsePoleOther(unit.Other)
+				return induce
+			}()
 		}
 		if rand.Intn(100) >= 90 {
 			ctx.Send(
@@ -529,7 +548,7 @@ func init() {
 		}
 		attribute := strconv.Itoa(durationList[thingName]) + "/0/" + strconv.Itoa(induceLevel/upgradeNum) + "/" + strconv.Itoa(favorLevel/upgradeNum)
 		newthing := article{
-			Duration: time.Now().Unix(),
+			Duration: nextItemID(),
 			Type:     "pole",
 			Name:     thingName,
 			Number:   1,
@@ -541,6 +560,7 @@ func init() {
 			newthing.Duration += int64(i * 10)
 			err = dbdata.updateUserThingInfo(uid, newthing)
 			if err != nil {
+				_ = dbdata.restorePoleUnits(uid, selectedUnits)
 				ctx.SendChain(message.Text("[ERROR at pole.go.12]:", err))
 				return
 			}

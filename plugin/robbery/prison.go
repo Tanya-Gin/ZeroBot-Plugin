@@ -2,6 +2,7 @@ package robbery
 
 import (
 	"fmt"
+	errors "github.com/pkg/errors"
 	"math"
 	"math/rand"
 	"strconv"
@@ -130,7 +131,7 @@ func robberyReward(risk, victimBalance int) int {
 	if reward > victimBalance {
 		reward = victimBalance
 	}
-	return max(0, reward)
+	return robberyTransferAmount(reward, victimBalance)
 }
 
 func arrestChance(recent int) int {
@@ -231,7 +232,7 @@ func (repo *prisonRepository) bail(uid int64, now time.Time, charge, refund func
 	}
 	if _, err := repo.db.Exec("UPDATE prison SET status = ? WHERE user_id = ? AND status = ?", prisonResultReleased, uid, prisonResultArrested); err != nil {
 		if refundErr := refund(row.Bail); refundErr != nil {
-			return row, true, fmt.Errorf("release update failed (%v); refund failed (%v)", err, refundErr)
+			return row, true, errors.Errorf("release update failed (%v); refund failed (%v)", err, refundErr)
 		}
 		return row, true, err
 	}
@@ -332,7 +333,7 @@ func registerPrisonCommands(engine *zero.Engine) {
 		uid := ctx.Event.UserID
 		_, active, err := prisonRepo.bail(uid, time.Now(), func(amount int) error {
 			if wallet.GetWalletOf(uid) < amount {
-				return fmt.Errorf("余额不足")
+				return errors.Errorf("余额不足")
 			}
 			return wallet.InsertWalletOf(uid, -amount)
 		}, func(amount int) error { return wallet.InsertWalletOf(uid, amount) })
@@ -366,7 +367,7 @@ func registerPrisonCommands(engine *zero.Engine) {
 		payer := ctx.Event.UserID
 		r, active, err := prisonRepo.bail(target, time.Now(), func(amount int) error {
 			if wallet.GetWalletOf(payer) < amount {
-				return fmt.Errorf("余额不足")
+				return errors.Errorf("余额不足")
 			}
 			return wallet.InsertWalletOf(payer, -amount)
 		}, func(amount int) error { return wallet.InsertWalletOf(payer, amount) })

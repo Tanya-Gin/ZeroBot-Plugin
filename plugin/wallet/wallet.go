@@ -15,12 +15,32 @@ import (
 	ctrl "github.com/FloatTech/zbpctrl"
 	"github.com/FloatTech/zbputils/control"
 	"github.com/FloatTech/zbputils/ctxext"
-	"github.com/FloatTech/zbputils/img/text"
-	"github.com/golang/freetype"
 	"github.com/wcharczuk/go-chart/v2"
 	zero "github.com/wdvxdr1123/ZeroBot"
 	"github.com/wdvxdr1123/ZeroBot/message"
 )
+
+func mentionedUID(msg message.Message, raw ...[]byte) (string, bool) {
+	find := func(segments message.Message) (string, bool) {
+		for _, segment := range segments {
+			if segment.Type != "at" {
+				continue
+			}
+			uid := strings.TrimSpace(segment.Data["qq"])
+			if uid != "" {
+				return uid, true
+			}
+		}
+		return "", false
+	}
+	if uid, ok := find(msg); ok {
+		return uid, true
+	}
+	if len(raw) > 0 {
+		return find(message.ParseMessage(raw[0]))
+	}
+	return "", false
+}
 
 func init() {
 	en := control.AutoRegister(&ctrl.Options[*zero.Ctx]{
@@ -61,7 +81,7 @@ func init() {
 		Handle(func(ctx *zero.Ctx) {
 			gid := strconv.FormatInt(ctx.Event.GroupID, 10)
 			today := time.Now().Format("20060102")
-			drawedFile := cachePath + gid + today + "walletRank.png"
+			drawedFile := cachePath + walletRankCacheName(gid, today)
 			if file.IsExist(drawedFile) {
 				ctx.SendChain(message.Image("file:///" + file.BOTPATH + "/" + drawedFile))
 				return
@@ -84,17 +104,7 @@ func init() {
 			} else if len(st) > 10 {
 				st = st[:10]
 			}
-			_, err = file.GetLazyData(text.FontFile, control.Md5File, true)
-			if err != nil {
-				ctx.SendChain(message.Text("ERROR: ", err))
-				return
-			}
-			b, err := os.ReadFile(text.FontFile)
-			if err != nil {
-				ctx.SendChain(message.Text("ERROR: ", err))
-				return
-			}
-			font, err := freetype.ParseFont(b)
+			font, err := loadChartFont()
 			if err != nil {
 				ctx.SendChain(message.Text("ERROR: ", err))
 				return
@@ -108,10 +118,16 @@ func init() {
 			for _, v := range st {
 				if v.Money != 0 {
 					bars = append(bars, chart.Value{
-						Label: ctx.CardOrNickName(v.UID),
+						Label: sanitizeChartLabel(font, ctx.CardOrNickName(v.UID), walletRankLabelMaxRunes),
 						Value: float64(v.Money),
 					})
 				}
+			}
+			if len(bars) == 0 {
+				_ = f.Close()
+				_ = os.Remove(drawedFile)
+				ctx.SendChain(message.Text("ERROR: 当前没有余额非零的成员可供排名"))
+				return
 			}
 			err = chart.BarChart{
 				Font:  font,
@@ -164,10 +180,8 @@ func init() {
 			}
 
 			// 捕获用户QQ号，只支持@事件
-			var uidStr string
-			if len(ctx.Event.Message) > 1 && ctx.Event.Message[1].Type == "at" {
-				uidStr = ctx.Event.Message[1].Data["qq"]
-			} else {
+			uidStr, ok := mentionedUID(ctx.Event.Message, ctx.Event.NativeMessage)
+			if !ok {
 				// 没at就修改自己的钱包
 				uidStr = strconv.FormatInt(ctx.Event.UserID, 10)
 			}
@@ -193,10 +207,8 @@ func init() {
 	en.OnPrefixGroup([]string{`查看钱包余额`, `查看我的钱包`}).SetBlock(true).Limit(ctxext.LimitByGroup).
 		Handle(func(ctx *zero.Ctx) {
 			param := ctx.State["args"].(string)
-			var uidStr string
-			if len(ctx.Event.Message) > 1 && ctx.Event.Message[1].Type == "at" {
-				uidStr = ctx.Event.Message[1].Data["qq"]
-			} else if param == "" {
+			uidStr, ok := mentionedUID(ctx.Event.Message, ctx.Event.NativeMessage)
+			if !ok && param == "" {
 				uidStr = strconv.FormatInt(ctx.Event.UserID, 10)
 			}
 			uidInt, err := strconv.ParseInt(uidStr, 10, 64)
@@ -221,10 +233,8 @@ func init() {
 			}
 
 			// 捕获用户QQ号，只支持@事件
-			var uidStr string
-			if len(ctx.Event.Message) > 1 && ctx.Event.Message[1].Type == "at" {
-				uidStr = ctx.Event.Message[1].Data["qq"]
-			} else {
+			uidStr, ok := mentionedUID(ctx.Event.Message, ctx.Event.NativeMessage)
+			if !ok {
 				ctx.SendChain(message.Reply(ctx.Event.MessageID), message.Text("获取被转方信息失败"))
 				return
 			}

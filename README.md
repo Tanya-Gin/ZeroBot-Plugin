@@ -10,7 +10,6 @@
   ZeroBot-Plugin 是 ZeroBot 的 实用插件合集<br><br>
 
 
-  <img src="https://counter.seku.su/cmoe?name=ZeroBot-Plugin&theme=r34" /><br>
 
   [![miraigo](https://img.shields.io/badge/OneBot-MiraiGo-green.svg?style=social&logo=appveyor)](https://github.com/Mrs4s/MiraiGo)
   [![oicq](https://img.shields.io/badge/OneBot-OICQ-green.svg?style=social&logo=appveyor)](https://github.com/takayama-lily/oicq)
@@ -23,6 +22,7 @@
   [![zerobot](https://img.shields.io/badge/zerobot-v1.8.2-black?style=flat-square&logo=go)](https://github.com/wdvxdr1123/ZeroBot)
 
 
+  ZeroBot官方频道：
   
   [![license](https://img.shields.io/github/license/FloatTech/ZeroBot-Plugin.svg?style=flat-square&logo=gnu)](https://raw.githubusercontent.com/FloatTech/ZeroBot-Plugin/master/LICENSE)
   [![tencent-qq](https://img.shields.io/badge/%E7%BE%A4-1048452984-red?style=flat-square&logo=tencent-qq)](https://jq.qq.com/?_wv=1027&k=QMb7x1mM)
@@ -32,14 +32,12 @@
   本项目符合 [OneBot](https://github.com/howmanybots/onebot) 标准，可基于以下项目与机器人框架/平台进行交互
   | 项目地址 | 平台 | 核心作者 | 备注 |
   | :---: | :---: | :---: | :---: |
-  | [LLOneBot](https://github.com/LLOneBot/LLOneBot) | NTQQ | linyuchen | 目前推荐使用 |
-  | [go-cqhttp](https://github.com/Mrs4s/go-cqhttp) | [MiraiGo](https://github.com/Mrs4s/MiraiGo) | Mrs4s | 因签名原因不再维护 |
-  | [onebot-kotlin](https://github.com/yyuueexxiinngg/onebot-kotlin) | [Mirai](https://github.com/mamoe/mirai) | yyuueexxiinngg | 不再积极维护 |
-  | [oicq/http-api](https://github.com/takayama-lily/oicq/tree/master/http-api) | [OICQ](https://github.com/takayama-lily/oicq) | takayama | 已归档不再维护 |
-
+  | [LuckyLilliaBot](https://github.com/LLOneBot/LuckyLilliaBot) | NTQQ | linyuchen | 目前推荐使用 |
   [![Star Trend](https://star-history.dera.page/svg?repos=FloatTech/ZeroBot-Plugin&type=Timeline)](https://seladb.github.io/StarTrack-js/#/preload?r=FloatTech,ZeroBot-Plugin)
 
 </div>
+
+>力推原版ZeroBotPlugin👍
 
 > 专为[后 go-cqhttp 时代](https://github.com/Mrs4s/go-cqhttp/issues/2471)开发迁移的`类zbp`新机器人现已出炉，基于官方api，稳定不风控: [NanoBot-Plugin](https://github.com/FloatTech/NanoBot-Plugin)
 
@@ -47,7 +45,7 @@
 
 > webui持续开发中, 欢迎加入[ZeroBot-Plugin-Webui](https://github.com/FloatTech/ZeroBot-Plugin-Webui)
 
-## 命令行参数
+## 命令行参数 ✔️
 > `[]`代表是可选参数
 ```bash
 zerobot [-h] [-m] [-n nickname] [-t token] [-u url] [-g url] [-p prefix] [-d|w] [-c|s config.json] [-l latency] [-r ringlen] [-x max process time] [-mirror] [qq1 qq2 qq3 ...] [&]
@@ -395,6 +393,89 @@ print("run[CQ:image,file="+j["img"]+"]")
 </details>
 
 ### *中优先级*
+#### *==从custom加载的定制插件==*
+
+> 以下为本项目 `custom/register.go` 中注册的定制插件。
+
+<details>
+  <summary>blackjack（21点）</summary>
+
+  `import _ "github.com/FloatTech/ZeroBot-Plugin/custom/plugin/blackjack"`
+
+  - [x] 开始21点 | 21点单人
+  - [x] 开始21点多人 | 21点房间 | 加入21点 | 加入
+  - [x] 要牌 | hit | h；停牌 | stand | s
+  - [x] 分牌 | split；加倍 | double；投降 | surrender
+  - [x] 查看21点 | 牌局状态
+  - [x] 21点规则
+  - [x] （管理员）强制结束21点 | 清理21点
+  - [x] （管理员）21点测试（测试模式，不修改真实钱包）
+
+</details>
+<details>
+  <summary>cybercat（云养猫）</summary>
+
+  - 基于FloatTech/ZeroBot-Plugin-Playground/tree/main/plugin/cybercat的二次开发版本
+
+  `import _ "github.com/FloatTech/ZeroBot-Plugin/custom/plugin/cybercat"`
+
+  - [x] 吸猫 | 吸[猫种]猫
+  - [x] 买猫 | 买[猫种]猫 | 买[袋数]袋猫粮
+  - [x] 喂猫 | 喂猫[数量]斤猫粮 | 猫猫状态
+  - [x] 猫猫打工[1-9]小时 | 撸猫（逗猫、摸猫、玩猫、rua猫、mua猫）
+  - [x] 猫猫改名叫[名称] | 上传猫猫照片
+  - [x] 喵喵PK@[对方] | 猫猫排行榜 | 喵喵排行榜
+
+</details>
+<details>
+  <summary>partygame（派对游戏）</summary>
+
+  - FloatTech/ZeroBot-Plugin-Playground/tree/main/plugin/partygame原版
+
+  `import _ "github.com/FloatTech/ZeroBot-Plugin/custom/plugin/partygame"`
+
+  - [x] 真心话大冒险 | 来点刺激 | 来点乐子（可选 @参与者）
+  - [x] （管理员）惩罚@[参与者] | 降下神罚@[参与者]
+  - [x] （管理员）饶恕@[参与者] | 阿门 | 释放 | 原谅 | 赦免
+  - [x] 反省@[参与者] | 检查罪行@[参与者]
+  - [x] 创建轮盘赌 | 加入轮盘赌 | 开始轮盘赌 | 开火
+  - [x] （管理员）终止轮盘赌
+
+</details>
+<details>
+  <summary>playwright（网页截图）</summary>
+
+- FloatTech/ZeroBot-Plugin-Playground/tree/main/plugin/partygame原版
+
+  `import _ "github.com/FloatTech/ZeroBot-Plugin/custom/plugin/playwright"`
+
+  - [x] （超级用户）/网页截图 -p [网页链接] -w [宽度] -h [高度]
+  - [x] >github [关键词]（搜索 GitHub 仓库并生成截图）
+
+</details>
+<details>
+  <summary>randomcat（随机猫狗图片）</summary>
+
+  - 定制插件
+
+  `import _ "github.com/FloatTech/ZeroBot-Plugin/custom/plugin/randomcat"`
+
+  - [x] 随机猫猫 | 随机狗狗 | 随机猫狗
+
+</details>
+<details>
+  <summary>whattoeat（今天吃什么）</summary>
+
+  - 定制插件
+
+  `import _ "github.com/FloatTech/ZeroBot-Plugin/custom/plugin/whattoeat"`
+
+  - [x] 今天吃什么 | 吃什么 | 中午吃什么 | 晚上吃什么 | 午饭吃什么 | 晚饭吃什么（随机推荐一道中式菜品并附图片）
+
+</details>
+
+#### *====原生插件====*
+
 <details>
   <summary>ahsai tts</summary>
 
@@ -996,9 +1077,11 @@ print("run[CQ:image,file="+j["img"]+"]")
 
 </details>
 <details>
-  <summary>钓鱼模拟器</summary>
+  <summary>钓鱼模拟器（二次开发）</summary>
 
   `import _ "github.com/FloatTech/ZeroBot-Plugin/plugin/mcfish"`
+
+  - 二次开发：修正鱼竿/特殊物品识别与估值，完善商店限购、刷新及附魔交易相关逻辑。
 
   - [x] 钓鱼商店
   - [x] 购买xxx [数量]
@@ -1225,9 +1308,11 @@ print("run[CQ:image,file="+j["img"]+"]")
 
 </details>
 <details>
-  <summary>抽扑克</summary>
+  <summary>抽扑克（二次开发）</summary>
   
   `import _ "github.com/FloatTech/ZeroBot-Plugin/plugin/poker"`
+
+  - 二次开发：移除远程懒加载牌图清单，改为从固定 HTTPS 牌图资源中抽取并发送，增加索引与地址校验。
 
   - [x] 抽扑克牌
 
@@ -1311,9 +1396,11 @@ print("run[CQ:image,file="+j["img"]+"]")
 
 </details>
 <details>
-  <summary>打劫</summary>
+  <summary>打劫（二次开发）</summary>
 
 `import _ "github.com/FloatTech/ZeroBot-Plugin/plugin/robbery"`
+
+- 二次开发：调整打劫风险收益与抓捕规则，新增持久化监狱、刑期、保释及服刑期间的指令限制。
 
 - [x] 打劫[对方Q号|@对方QQ]
 
@@ -1462,9 +1549,11 @@ print("run[CQ:image,file="+j["img"]+"]")
 
 </details>
 <details>
-  <summary>钱包</summary>
+  <summary>钱包（二次开发）</summary>
 
   `import _ "github.com/FloatTech/ZeroBot-Plugin/plugin/wallet"`
+
+  - 二次开发：增强 @目标解析（含消息段回退），改进钱包排行榜昵称字符处理、字体加载与缓存。
 
   - [x] 查看钱包排名
 
@@ -1707,7 +1796,7 @@ print("run[CQ:image,file="+j["img"]+"]")
 
 ### 1. 使用稳定版/测试版 (推荐)
 
-可以前往[Release](https://github.com/FloatTech/ZeroBot-Plugin/releases)页面下载对应系统版本可执行文件，编译时开启了全部插件。
+可以前往[Release(官方版)](https://github.com/FloatTech/ZeroBot-Plugin/releases)页面下载对应系统版本可执行文件，编译时开启了全部插件。
 ### 2. 本地直接运行
 
 1. 下载安装最新 [Go](https://studygolang.com/dl) 环境
@@ -1726,7 +1815,7 @@ print("run[CQ:image,file="+j["img"]+"]")
 4. 前往 Release 页面发布一个 Release，`tag`形如`v1.2.3`，以触发稳定版编译流程
 5. 点击 Actions 按钮，等待编译完成，回到 Release 页面下载编译好的文件
 6. 运行 OneBot 框架，并同时运行本插件
-7. 啾咪~
+7. 啾咪~❤️
 
 #### b. 本地编译/交叉编译
 
